@@ -12,29 +12,52 @@
 </head>
 <body>
     <h1>Nutrition Research Agent</h1>
-    <p class="intro">Ask a question about nutrition for immunocompromised patients. The agent searches the web and writes a report.</p>
-
-    <p class="disclaimer">
-        This report is written by an AI from web search results and may contain mistakes.
-        It is for information only and does not replace advice from a doctor, pharmacist or dietitian.
+    <p class="intro">
+        Ask a question about nutrition for immunocompromised patients. The agent researches it and
+        writes a report, then you can ask follow-up questions about it.
     </p>
 
-    <form id="ask-form">
-        <label for="question">Your question</label>
-        <textarea id="question" maxlength="300" required
-            placeholder="e.g. Nutrition for a diabetic patient on warfarin"></textarea>
-        <button id="send" type="submit">Ask the agent</button>
-    </form>
+    <p class="disclaimer">
+        Answers are written by an AI from web search results and may contain mistakes.
+        They are for information only and do not replace advice from a doctor, pharmacist or dietitian.
+    </p>
+
+    <!-- The conversation. Empty at first; the script below adds one bubble
+         per message. aria-live makes screen readers announce new replies. -->
+    <div id="messages" aria-live="polite"></div>
 
     <p id="status" hidden></p>
-    <div id="answer" hidden></div>
+
+    <form id="chat-form">
+        <label for="message">Your question</label>
+        <textarea id="message" maxlength="300" required
+            placeholder="e.g. Nutrition for a diabetic patient on warfarin"></textarea>
+        <div class="actions">
+            <button id="send" type="submit">Send</button>
+            <button id="new-chat" type="button" class="secondary" hidden>New conversation</button>
+        </div>
+    </form>
 
     <script>
-        const form = document.getElementById("ask-form")
-        const questionBox = document.getElementById("question")
+        const form = document.getElementById("chat-form")
+        const messageBox = document.getElementById("message")
+        const messageLabel = document.querySelector("label[for=message]")
         const sendButton = document.getElementById("send")
+        const newChatButton = document.getElementById("new-chat")
         const statusLine = document.getElementById("status")
-        const answer = document.getElementById("answer")
+        const messages = document.getElementById("messages")
+
+        // The ID of this conversation. The server keeps a separate memory for
+        // each ID, so sending the same ID with every message is what lets the
+        // agent remember what was said earlier.
+        //
+        // It lives only in this variable, so reloading the page (or pressing
+        // "New conversation") makes a new ID and starts a fresh conversation.
+        let threadId = crypto.randomUUID()
+
+        // false until the agent's first reply (the report) has arrived.
+        // Used to pick the right wording for the box and the waiting message.
+        let conversationStarted = false
 
         function showStatus(text, isError) {
             statusLine.textContent = text
@@ -42,36 +65,108 @@
             statusLine.hidden = !text
         }
 
+        // Adds one message bubble to the conversation and returns it.
+        // who is "user" or "agent"; it becomes a CSS class that decides the
+        // bubble's colour and which side it sits on.
+        function addBubble(who, text) {
+            const bubble = document.createElement("div")
+            bubble.className = "bubble " + who
+
+            if (who === "agent") {
+                // The agent replies in Markdown: convert it to HTML, and
+                // sanitize the result before it goes on the page.
+                bubble.innerHTML = DOMPurify.sanitize(marked.parse(text))
+            } else {
+                // The visitor's own text is shown exactly as typed.
+                // textContent never treats it as HTML, so it is always safe.
+                bubble.textContent = text
+            }
+
+            messages.appendChild(bubble)
+            bubble.scrollIntoView({ behavior: "smooth", block: "start" })
+            return bubble
+        }
+
+        // Switches the wording between "first question" and "follow-up".
+        function updateFormWording() {
+            messageLabel.textContent = conversationStarted ? "Ask a follow-up" : "Your question"
+            messageBox.placeholder = conversationStarted
+                ? "e.g. Can they eat mangoes?"
+                : "e.g. Nutrition for a diabetic patient on warfarin"
+            newChatButton.hidden = !conversationStarted
+        }
+
         form.addEventListener("submit", async (event) => {
             // Stop the browser's default behaviour of reloading the page
             event.preventDefault()
 
+            const text = messageBox.value.trim()
+            if (!text) return
+
+            // Show the visitor's message straight away and clear the box, so
+            // the page responds instantly even though the answer takes time.
+            const userBubble = addBubble("user", text)
+            messageBox.value = ""
             sendButton.disabled = true
-            answer.hidden = true
-            showStatus("Researching and writing your report. This can take up to a minute...")
+            newChatButton.disabled = true
+            showStatus(conversationStarted
+                ? "Thinking..."
+                : "Researching and writing your report. This can take up to a minute...")
 
             try {
-                // Send the question to our Express route as JSON
-                const response = await fetch("/api/ask", {
+                // Send the message to our Express route as JSON, together
+                // with the conversation ID so the server knows which memory
+                // to use.
+                const response = await fetch("/api/chat", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ question: questionBox.value }),
+                    body: JSON.stringify({ threadId, message: text }),
                 })
                 const data = await response.json()
 
                 if (!response.ok) {
-                    showStatus(data.error || "Something went wrong.", true)
-                    return
+                    throw new Error(data.error || "Something went wrong.")
                 }
 
-                answer.innerHTML = DOMPurify.sanitize(marked.parse(data.report))
-                answer.hidden = false
+                addBubble("agent", data.reply)
+                conversationStarted = true
+                updateFormWording()
                 showStatus("")
             } catch (error) {
-                showStatus("Could not reach the server. Please try again.", true)
+                // The message was not answered, so take its bubble back out
+                // and put the text back in the box for the visitor to resend.
+                userBubble.remove()
+                messageBox.value = text
+                // A failed fetch (no connection) throws a TypeError; anything
+                // else is an error message the server sent us.
+                showStatus(error instanceof TypeError
+                    ? "Could not reach the server. Please try again."
+                    : error.message, true)
             } finally {
                 sendButton.disabled = false
+                newChatButton.disabled = false
+                messageBox.focus()
             }
+        })
+
+        // Enter sends the message, like a chat app. Shift+Enter still makes
+        // a new line. requestSubmit() runs the same submit handler above.
+        messageBox.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault()
+                if (!sendButton.disabled) form.requestSubmit()
+            }
+        })
+
+        // Start over: a new ID means the server sees a brand-new conversation
+        // with no history, and we clear the bubbles to match.
+        newChatButton.addEventListener("click", () => {
+            threadId = crypto.randomUUID()
+            conversationStarted = false
+            messages.replaceChildren()
+            updateFormWording()
+            showStatus("")
+            messageBox.focus()
         })
     </script>
 </body>
