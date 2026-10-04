@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Nutrition Research Agent</title>
+    <!-- marked turns the agent's Markdown into HTML; DOMPurify strips anything
+         unsafe from that HTML before it is put on the page -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@18/lib/marked.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>Nutrition Research Agent</h1>
+    <p class="intro">Ask a question about nutrition for immunocompromised patients. The agent searches the web and writes a report.</p>
+
+    <p class="disclaimer">
+        This report is written by an AI from web search results and may contain mistakes.
+        It is for information only and does not replace advice from a doctor, pharmacist or dietitian.
+    </p>
+
+    <form id="ask-form">
+        <label for="question">Your question</label>
+        <textarea id="question" maxlength="300" required
+            placeholder="e.g. Nutrition for a diabetic patient on warfarin"></textarea>
+        <button id="send" type="submit">Ask the agent</button>
+    </form>
+
+    <p id="status" hidden></p>
+    <div id="answer" hidden></div>
+
+    <script>
+        const form = document.getElementById("ask-form")
+        const questionBox = document.getElementById("question")
+        const sendButton = document.getElementById("send")
+        const statusLine = document.getElementById("status")
+        const answer = document.getElementById("answer")
+
+        function showStatus(text, isError) {
+            statusLine.textContent = text
+            statusLine.className = isError ? "error" : ""
+            statusLine.hidden = !text
+        }
+
+        form.addEventListener("submit", async (event) => {
+            // Stop the browser's default behaviour of reloading the page
+            event.preventDefault()
+
+            sendButton.disabled = true
+            answer.hidden = true
+            showStatus("Researching and writing your report. This can take up to a minute...")
+
+            try {
+                // Send the question to our Express route as JSON
+                const response = await fetch("/api/ask", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ question: questionBox.value }),
+                })
+                const data = await response.json()
+
+                if (!response.ok) {
+                    showStatus(data.error || "Something went wrong.", true)
+                    return
+                }
+
+                answer.innerHTML = DOMPurify.sanitize(marked.parse(data.report))
+                answer.hidden = false
+                showStatus("")
+            } catch (error) {
+                showStatus("Could not reach the server. Please try again.", true)
+            } finally {
+                sendButton.disabled = false
+            }
+        })
+    </script>
+</body>
+</html>
