@@ -13,8 +13,9 @@
 <body>
     <h1>Nutrition Research Agent</h1>
     <p class="intro">
-        Ask a question about nutrition for immunocompromised patients. The agent researches it and
-        writes a report, then you can ask follow-up questions about it.
+        Ask a question about nutrition for immunocompromised patients or about food and medicine
+        interactions. The agent searches the web and answers, and remembers the conversation so you
+        can ask follow-up questions.
     </p>
 
     <p class="disclaimer">
@@ -31,7 +32,7 @@
     <form id="chat-form">
         <label for="message">Your question</label>
         <textarea id="message" maxlength="300" required
-            placeholder="e.g. Nutrition for a diabetic patient on warfarin"></textarea>
+            placeholder="e.g. Can a patient on warfarin eat sukuma wiki every day?"></textarea>
         <div class="actions">
             <button id="send" type="submit">Send</button>
             <button id="new-chat" type="button" class="secondary" hidden>New conversation</button>
@@ -55,8 +56,8 @@
         // "New conversation") makes a new ID and starts a fresh conversation.
         let threadId = crypto.randomUUID()
 
-        // false until the agent's first reply (the report) has arrived.
-        // Used to pick the right wording for the box and the waiting message.
+        // false until the agent's first reply has arrived.
+        // Used to pick the right wording for the question box.
         let conversationStarted = false
 
         function showStatus(text, isError) {
@@ -91,8 +92,8 @@
         function updateFormWording() {
             messageLabel.textContent = conversationStarted ? "Ask a follow-up" : "Your question"
             messageBox.placeholder = conversationStarted
-                ? "e.g. Can they eat mangoes?"
-                : "e.g. Nutrition for a diabetic patient on warfarin"
+                ? "e.g. What about spinach?"
+                : "e.g. Can a patient on warfarin eat sukuma wiki every day?"
             newChatButton.hidden = !conversationStarted
         }
 
@@ -109,20 +110,29 @@
             messageBox.value = ""
             sendButton.disabled = true
             newChatButton.disabled = true
-            showStatus(conversationStarted
-                ? "Thinking..."
-                : "Researching and writing your report. This can take up to a minute...")
+            showStatus("Searching and writing an answer...")
 
             try {
                 // Send the message to our Express route as JSON, together
                 // with the conversation ID so the server knows which memory
                 // to use.
+                // fetch itself only fails when no response came back at all:
+                // the server is down, the connection dropped, or the page was
+                // opened as a file instead of through the server.
                 const response = await fetch("/api/chat", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ threadId, message: text }),
+                }).catch((cause) => {
+                    throw new Error("Could not reach the server. Please try again.", { cause })
                 })
-                const data = await response.json()
+
+                // Our server always answers in JSON. If the reply is not
+                // JSON, it came from something in front of our server (for
+                // example Render's own error page while the app restarts).
+                const data = await response.json().catch((cause) => {
+                    throw new Error(`The server is not available right now (error ${response.status}). Please try again in a minute.`, { cause })
+                })
 
                 if (!response.ok) {
                     throw new Error(data.error || "Something went wrong.")
@@ -137,11 +147,10 @@
                 // and put the text back in the box for the visitor to resend.
                 userBubble.remove()
                 messageBox.value = text
-                // A failed fetch (no connection) throws a TypeError; anything
-                // else is an error message the server sent us.
-                showStatus(error instanceof TypeError
-                    ? "Could not reach the server. Please try again."
-                    : error.message, true)
+                showStatus(error.message, true)
+                // Keep the technical details in the browser console (F12)
+                // for us; the visitor only sees the plain message above.
+                console.error("Chat request failed:", error, error.cause)
             } finally {
                 sendButton.disabled = false
                 newChatButton.disabled = false

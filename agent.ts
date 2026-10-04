@@ -3,7 +3,6 @@ import {ChatOpenAI} from "@langchain/openai"
 import { tavily } from "@tavily/core"
 import * as dotenv from "dotenv"
 import { writeFile } from "node:fs/promises"
-import { randomUUID } from "node:crypto"
 import { marked } from "marked"
 
 //used to read content of .env file and loads its key-value pair into the
@@ -16,45 +15,35 @@ if (!process.env.TAVILY_API_KEY) {
 
 const tavilyClient = tavily({ apiKey: process.env.TAVILY_API_KEY })
 
-// Connect to the free OpenRouter Nemotron endpoint. Created once here so
-// both the author node (full report) and the chat node (follow-up answers)
-// share the same model.
+// Connect to the OpenRouter Nemotron endpoint. The ":free" at the end of the
+// model name is what selects the free version; without it OpenRouter charges
+// for each request. Created once here so
+// both the chat node (website conversations) and the author node (the
+// terminal report) share the same model.
 const model = new ChatOpenAI({
     configuration: { baseURL: "https://openrouter.ai/api/v1" },
-    modelName: "nvidia/nemotron-3-nano-30b-a3b",
+    modelName: "nvidia/nemotron-3-super-120b-a12b:free",
     apiKey: process.env.OPENROUTER_API_KEY
 })
 
-/**
- * One line of the conversation: who spoke and what they said.
- * "user" is the visitor, "assistant" is the agent. These are the same role
- * names the model itself expects, so a ChatTurn can be sent to it as-is.
- */
-type ChatTurn = {
-    role: "user" | "assistant"
-    content: string
-}
+// This file holds two separate graphs:
+//
+//   1. The REPORT graph (researcher -> author). It writes one long report
+//      and is only used from the terminal, with `npm run report`.
+//   2. The CHAT graph (a single chat node). It answers one specific question
+//      at a time and remembers the conversation. This is what the website
+//      uses.
+//
+// Each graph has its own state, because they need to remember different
+// things. The report graph comes first.
 
-//define the memory schema
+//define the memory schema for the report graph
 
 const AgentState = Annotation.Root({
-    topic: Annotation<string>(), //the first question of the conversation; the report is written about this
+    topic: Annotation<string>(), //input provided by the user
     reportStructure: Annotation<string>(), //input provided by the user: the layout the report must follow
     researchData: Annotation<string[]>(), //saved by Researcher, read by Author
-    report: Annotation<string>(), //saved by the author; later read by the chat node as background
-
-    question: Annotation<string>(), //the message the visitor has just sent
-    answer: Annotation<string>(), //the agent's reply to that message (a report or a short chat answer)
-
-    // The whole conversation so far. Every other field above is simply
-    // overwritten when a node returns a new value, but for the history we
-    // want to ADD to what is already there. A "reducer" tells LangGraph how
-    // to combine the saved value with a node's update: here, by appending
-    // the new turns to the end of the existing list.
-    messages: Annotation<ChatTurn[]>({
-        reducer: (existing, update) => existing.concat(update),
-        default: () => [], //a brand-new conversation starts with no history
-    }),
+    report: Annotation<string>(), //saved by the author as the final output
 })
 
 // example of JSON schema converted by an AI framework:
@@ -198,9 +187,8 @@ async function researcherNode(state: typeof AgentState.State) {
  *
  * @param state - Current graph state; reads `state.topic`,
  *   `state.reportStructure` and `state.researchData`.
- * @returns A partial state update setting `report` and `answer` to the
- *   model's generated report text, and adding the first exchange (the
- *   visitor's question and this report) to `messages`.
+ * @returns A partial state update setting `report` to the model's
+ *   generated report text.
  */
 async function authorNode(state: typeof AgentState.State) {
 console.log("--- RUNNING AUTHOR PHASE ---")
@@ -244,25 +232,58 @@ Your queries should be:
     REPORT:`;
 
     const response = await model.invoke(prompt);
-    const report = response.content as string
 
-    return {
-        // Kept for the rest of the conversation: the chat node reads it as
-        // background when answering follow-up questions.
-        report,
-        // What gets sent back to the visitor for this message.
-        answer: report,
-        // Record the first exchange. Because `messages` has a reducer, these
-        // two turns are appended to the history instead of replacing it.
-        messages: [
-            { role: "user" as const, content: state.question },
-            { role: "assistant" as const, content: report },
-        ],
-    };
+    // Update the final state entry with the generated text
+    return { report: response.content as string };
 }
 
-// How many earlier turns the chat node sends to the model with each
-// follow-up. A model can only read a limited amount of text per request, and
+    const workflow = new StateGraph(AgentState)
+  // 1. Mount the components as executable blocks
+  .addNode("researcher", researcherNode)
+  .addNode("author", authorNode)
+
+  // 2. Map out the execution path links
+  .addEdge("__start__", "researcher")
+  .addEdge("researcher", "author")
+  .addEdge("author", END);
+
+// 3. Compile the structural map into a runnable agent application
+const reportApp = workflow.compile();
+
+// ---------------------------------------------------------------------------
+// The CHAT graph: what the website uses.
+// ---------------------------------------------------------------------------
+
+/**
+ * One line of the conversation: who spoke and what they said.
+ * "user" is the visitor, "assistant" is the agent. These are the same role
+ * names the model itself expects, so a ChatTurn can be sent to it as-is.
+ */
+type ChatTurn = {
+    role: "user" | "assistant"
+    content: string
+}
+
+//define the memory schema for the chat graph
+
+const ChatState = Annotation.Root({
+    question: Annotation<string>(), //the message the visitor has just sent
+    answer: Annotation<string>(), //the agent's reply to that message
+
+    // The whole conversation so far. The two fields above are simply
+    // overwritten when a node returns a new value, but for the history we
+    // want to ADD to what is already there. A "reducer" tells LangGraph how
+    // to combine the saved value with a node's update: here, by appending
+    // the new turns to the end of the existing list.
+    messages: Annotation<ChatTurn[]>({
+        reducer: (existing, update) => existing.concat(update),
+        default: () => [], //a brand-new conversation starts with no history
+    }),
+})
+
+
+// How many earlier turns the chat node sends to the model with each new
+// question. A model can only read a limited amount of text per request, and
 // every extra turn makes the request slower, so we send only the most recent
 // ones. 10 turns = the last 5 questions and their 5 answers.
 const HISTORY_LIMIT = 10
@@ -271,71 +292,85 @@ const HISTORY_LIMIT = 10
 const MAX_SEARCH_QUERY_LENGTH = 400
 
 /**
- * LangGraph node that answers a follow-up question in an existing
- * conversation.
- *
- * The first message of a conversation goes through researcher -> author and
- * produces a full report. Every message after that comes here instead, so a
- * short question like "can they eat mangoes?" gets a short answer rather
- * than another nine searches and another full report.
+ * LangGraph node that answers one question in a conversation. Every message
+ * a visitor sends on the website comes through here.
  *
  * It does three things:
- *   1. Runs ONE web search for the follow-up question, in case it asks about
- *      something the original research did not cover.
- *   2. Builds a request for the model out of: instructions, the report
- *      written earlier, the fresh search results, the recent conversation,
- *      and finally the new question.
+ *   1. Runs a web search for the question, so the answer is based on real
+ *      sources rather than only on what the model remembers.
+ *   2. Builds a request for the model out of: instructions, the search
+ *      results, the recent conversation, and finally the new question.
  *   3. Saves the model's reply and adds the exchange to the history.
  *
- * @param state - Current graph state; reads `state.question`, `state.topic`,
- *   `state.report` and `state.messages`.
+ * @param state - Current graph state; reads `state.question` and
+ *   `state.messages`.
  * @returns A partial state update setting `answer` to the model's reply and
  *   adding the question and reply to `messages`.
  */
-async function chatNode(state: typeof AgentState.State) {
+async function chatNode(state: typeof ChatState.State) {
     console.log("--- RUNNING CHAT PHASE ---")
 
-    // 1. Search for the follow-up. The original topic is put in front of the
-    // question because follow-ups often make no sense alone: "can they eat
-    // mangoes?" only becomes searchable once we say who "they" are.
-    const searchQuery = `${state.topic}: ${state.question}`.slice(0, MAX_SEARCH_QUERY_LENGTH)
+    // 1. Search the web for the question.
+    //
+    // Follow-up questions often make no sense alone: "can they eat mangoes?"
+    // is only searchable once we know who "they" are. So if the visitor has
+    // asked something before, we put their previous question in front of the
+    // new one to give the search that context.
+    //
+    // findLast walks the history backwards and returns the most recent turn
+    // spoken by the visitor (undefined if this is their first question).
+    const previousQuestion = state.messages.findLast((turn) => turn.role === "user")?.content
+    const searchQuery = (previousQuestion ? `${previousQuestion} ${state.question}` : state.question)
+        .slice(0, MAX_SEARCH_QUERY_LENGTH)
 
-    let searchSnippets: string[] = []
+    let searchResults = "(no search results were found)"
     try {
-        const searchData = await tavilyClient.search(searchQuery, { maxResults: 3 })
-        searchSnippets = dedupeSnippets(searchData.results?.map((res) => res.content) || [])
+        const searchData = await tavilyClient.search(searchQuery, { maxResults: 5 })
+        if (searchData.results?.length) {
+            // Number each result and keep its title and link next to its
+            // text, so the model can tell the visitor where a fact came from.
+            searchResults = searchData.results
+                .map((res, i) => `[${i + 1}] ${res.title}\nLink: ${res.url}\n${res.content.trim()}`)
+                .join("\n\n")
+        }
     } catch (error) {
         // A failed search should not end the conversation. The model can
-        // still answer from the report and the history, so log and carry on.
-        console.warn(`Search failed for follow-up "${state.question}":`, error)
+        // still answer from the history and its own knowledge, so log and
+        // carry on.
+        console.warn(`Search failed for question "${state.question}":`, error)
     }
 
     // 2a. The "system" message: instructions and background the model should
     // follow for the whole reply. The visitor never sees this text.
-    const systemPrompt = `You are a careful clinical nutrition assistant continuing a conversation about: ${state.topic}.
+    const systemPrompt = `You are a careful clinical nutrition assistant. You help with nutrition for immunocompromised patients (elderly, HIV, diabetes, cancer, infants and neonates, post-operative, and patients on medicines such as Revlimid, Velcade and dexamethasone) and with drug-nutrient interactions.
 
-Earlier in this conversation you wrote the report below. The user is now asking a follow-up question.
+Scope (check this first, before anything else):
+- You only answer questions about nutrition, food, diet, and how medicines interact with food.
+- If the question is about anything else (sport, news, politics, coding, general knowledge and so on), reply with one sentence saying you can only help with nutrition questions, and nothing more. Do this even if the search results below contain the answer.
 
 How to answer:
-- Answer the follow-up directly and briefly: a few short paragraphs or bullet points, not another full report.
-- Use Markdown. Use a table only if the user asks to compare things.
-- Base your answer on the report and the new search results below. If they do not cover the question, say so plainly instead of guessing.
+- Answer the specific question the user asked, directly and first. Do not write a report or cover topics they did not ask about.
+- Keep it short: a few sentences or a short bullet list. Give more detail only if the user asks for it.
+- Use Markdown. Use a table only when the user asks for a meal plan or a comparison. Do not use emojis.
+- Base your answer on the search results below. If they do not cover the question, say what is uncertain instead of guessing.
 - When you suggest foods or meals, prefer Kenyan foods that are affordable and easy to find.
-- Safety is key. Point out relevant drug-nutrient interactions and renal or hepatic restrictions.
-- You are giving general information, not treating a patient. When the question is about a specific person's diet or medication, remind the user to confirm with their doctor, pharmacist or dietitian before changing anything.
+- If the answer depends on something you were not told (for example the patient's medicines, kidney or liver function, age or allergies), give the general answer and then ask for the one detail that matters most.
 
-REPORT YOU WROTE EARLIER:
-${state.report}
+Safety:
+- Safety is key. Mention relevant drug-nutrient interactions (grapefruit family, vitamin K consistency, tyramine, potassium, sodium, St John's Wort, calcium/iron timing, CYP450 inducers and inhibitors) and renal or hepatic restrictions when they apply to the question.
+- You give general information; you are not treating a patient. When the question is about a specific person's diet or medication, end by reminding the user to confirm with their doctor, pharmacist or dietitian before changing anything.
 
-NEW SEARCH RESULTS FOR THIS QUESTION:
-${searchSnippets.join("\n\n") || "(no search results were found)"}`
+Sources:
+- If you used the search results, end with a "Sources:" list of the ones you used, each written as a Markdown link with its title, like [Title](https://link).
+- The user cannot see the search results or their numbers, so never refer to a result by its number.
+- Only use links that appear in the search results below. Never invent a link. If you did not use any, leave the Sources list out completely.
 
-    // 2b. The recent conversation. The first two saved turns are the opening
-    // question and the full report; both are already in the system message
-    // above (as the topic and the report), so slice(2) skips them to avoid
-    // sending the long report twice. slice(-HISTORY_LIMIT) then keeps only
-    // the most recent turns of whatever is left.
-    const recentTurns = state.messages.slice(2).slice(-HISTORY_LIMIT)
+SEARCH RESULTS FOR THIS QUESTION:
+${searchResults}`
+
+    // 2b. The recent conversation, so the model knows what "they", "it" or
+    // "that" refer to. slice(-HISTORY_LIMIT) keeps only the last few turns.
+    const recentTurns = state.messages.slice(-HISTORY_LIMIT)
 
     // 2c. Put it together in the order the model reads it: instructions,
     // then the earlier back-and-forth, then the new question last.
@@ -347,7 +382,8 @@ ${searchSnippets.join("\n\n") || "(no search results were found)"}`
     const answer = response.content as string
 
     // 3. Save the reply and append this exchange to the history, so the next
-    // follow-up can see it.
+    // question can see it. Because `messages` has a reducer, these two turns
+    // are added to the end of the history instead of replacing it.
     return {
         answer,
         messages: [
@@ -357,43 +393,18 @@ ${searchSnippets.join("\n\n") || "(no search results were found)"}`
     }
 }
 
-/**
- * Decides which node handles an incoming message. LangGraph calls this at
- * the very start of every run and goes to whichever node name it returns.
- *
- * The test is whether a report has already been written in this
- * conversation. If not, this is the first message, so do the full research.
- * If so, this is a follow-up, so go straight to the chat node.
- *
- * @param state - Current graph state; only `state.report` is read here.
- * @returns The name of the node to run next.
- */
-function routeMessage(state: typeof AgentState.State) {
-    return state.report ? "chat" : "researcher"
-}
-
-    const workflow = new StateGraph(AgentState)
-  // 1. Mount the components as executable blocks
-  .addNode("researcher", researcherNode)
-  .addNode("author", authorNode)
+// The chat graph has a single step: every message goes to the chat node.
+//
+//   START -> chat -> END
+const chatWorkflow = new StateGraph(ChatState)
   .addNode("chat", chatNode)
-
-  // 2. Map out the execution path links
-  // A conditional edge is a fork in the road: instead of always going to the
-  // same node, LangGraph calls routeMessage and follows its answer. The
-  // array lists every node it is allowed to choose.
-  //
-  //   first message:  START -> researcher -> author -> END
-  //   follow-up:      START -> chat -> END
-  .addConditionalEdges("__start__", routeMessage, ["researcher", "chat"])
-  .addEdge("researcher", "author")
-  .addEdge("author", END)
+  .addEdge("__start__", "chat")
   .addEdge("chat", END);
 
-// The checkpointer is the agent's memory between messages. After every node
-// finishes, it saves a copy of the state (topic, report, messages, ...). The
+// The checkpointer is the agent's memory between messages. After the chat
+// node finishes, it saves a copy of the state (including `messages`). The
 // next time the graph runs for the same conversation, it loads that copy
-// first, which is how a follow-up "remembers" the report and earlier turns.
+// first, which is how the agent "remembers" the earlier questions.
 //
 // MemorySaver keeps those copies in this server's RAM. That is simple and
 // needs no database, but it means every conversation is forgotten when the
@@ -401,8 +412,7 @@ function routeMessage(state: typeof AgentState.State) {
 // sleep after about 15 minutes without visitors).
 const checkpointer = new MemorySaver()
 
-// 3. Compile the structural map into a runnable agent application
-const app = workflow.compile({ checkpointer });
+const chatApp = chatWorkflow.compile({ checkpointer });
 
 // The layout a report follows when the caller doesn't supply its own
 const DEFAULT_REPORT_STRUCTURE = `This article should be a practical clinical reference, structured as:
@@ -439,22 +449,6 @@ setInterval(async () => {
 }, CLEANUP_INTERVAL_MS).unref()
 
 /**
- * Checks whether a conversation has already produced its report, i.e.
- * whether the next message in it will be a follow-up rather than a first
- * question. The server uses this to apply a stricter rate limit to first
- * questions, which are far more expensive than follow-ups.
- *
- * @param threadId - The ID of the conversation to look up.
- * @returns true if the conversation exists and has a report.
- */
-export async function conversationExists(threadId: string): Promise<boolean> {
-    // getState asks the checkpointer for the latest saved state of this
-    // conversation. For an ID it has never seen, `values` is simply empty.
-    const saved = await app.getState({ configurable: { thread_id: threadId } })
-    return Boolean(saved.values.report)
-}
-
-/**
  * Sends one message into a conversation and returns the agent's reply. This
  * is the single entry point the web server calls, so the server never needs
  * to know about nodes, state or LangGraph.
@@ -466,44 +460,35 @@ export async function conversationExists(threadId: string): Promise<boolean> {
  *
  * @param threadId - The ID of the conversation this message belongs to.
  * @param message - What the visitor typed.
- * @returns The reply as Markdown, and its `kind`: "report" for the full
- *   report that opens a conversation, "chat" for a follow-up answer.
+ * @returns The agent's reply as a Markdown string.
  */
-export async function sendMessage(
-    threadId: string,
-    message: string
-): Promise<{ reply: string; kind: "report" | "chat" }> {
+export async function sendMessage(threadId: string, message: string): Promise<string> {
     // Passing thread_id here is what makes the checkpointer load this
     // conversation's saved state before the graph runs, and save it after.
     const config = { configurable: { thread_id: threadId } }
 
-    const isFirstMessage = !(await conversationExists(threadId))
-
-    // We only pass in the fields that are new. Anything we leave out keeps
-    // its saved value, so on a follow-up the topic, report and history are
-    // all still there from the earlier runs.
-    const input = isFirstMessage
-        ? { question: message, topic: message, reportStructure: DEFAULT_REPORT_STRUCTURE }
-        : { question: message }
-
-    const state = await app.invoke(input, config)
+    // We only pass in the new question. The history is not passed in: it is
+    // already saved under this thread ID and is loaded automatically.
+    const state = await chatApp.invoke({ question: message }, config)
     lastActive.set(threadId, Date.now())
 
-    return { reply: state.answer, kind: isFirstMessage ? "report" : "chat" }
+    return state.answer
 }
 
 /**
- * Writes a one-off report for a topic, with no follow-up conversation. Used
- * when this file is run directly from the terminal.
+ * Runs the report graph (researcher -> author) for one topic and returns the
+ * finished report. Only used when this file is run from the terminal.
  *
  * @param topic - What the report should be about.
+ * @param reportStructure - The layout the report must follow.
  * @returns The generated report as a Markdown string.
  */
-async function generateReport(topic: string): Promise<string> {
-    // A fresh random ID means a brand-new conversation, so the message is
-    // treated as a first question and gets the full report.
-    const { reply } = await sendMessage(randomUUID(), topic)
-    return reply
+async function generateReport(
+    topic: string,
+    reportStructure: string = DEFAULT_REPORT_STRUCTURE
+): Promise<string> {
+    const state = await reportApp.invoke({ topic, reportStructure })
+    return state.report
 }
 
 async function runAgent() {

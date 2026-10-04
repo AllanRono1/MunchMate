@@ -44,7 +44,7 @@ h1 { margin-bottom: 0.25rem; }
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
-/* The agent's replies: white, on the left, full width so reports and
+/* The agent's replies: white, on the left, full width so longer answers and
    tables have room */
 .bubble.agent {
     align-self: stretch;
