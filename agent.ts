@@ -1,5 +1,5 @@
-import{StateGraph, Annotation, END, MemorySaver} from "@langchain/langgraph"
-import {ChatOpenAI} from "@langchain/openai"
+import { StateGraph, Annotation, END, MemorySaver } from "@langchain/langgraph"
+import { ChatOpenAI } from "@langchain/openai"
 import { tavily } from "@tavily/core"
 import * as dotenv from "dotenv"
 import { writeFile } from "node:fs/promises"
@@ -17,9 +17,8 @@ const tavilyClient = tavily({ apiKey: process.env.TAVILY_API_KEY })
 
 // Connect to the OpenRouter Nemotron endpoint. The ":free" at the end of the
 // model name is what selects the free version; without it OpenRouter charges
-// for each request. Created once here so
-// both the chat node (website conversations) and the author node (the
-// terminal report) share the same model.
+// for each request. Created once here so that both graphs share the same
+// model.
 const model = new ChatOpenAI({
     configuration: { baseURL: "https://openrouter.ai/api/v1" },
     modelName: "nvidia/nemotron-3-super-120b-a12b:free",
@@ -30,41 +29,12 @@ const model = new ChatOpenAI({
 //
 //   1. The REPORT graph (researcher -> author). It writes one long report
 //      and is only used from the terminal, with `npm run report`.
-//   2. The CHAT graph (a single chat node). It answers one specific question
-//      at a time and remembers the conversation. This is what the website
-//      uses.
+//   2. The CHAT graph. It follows the same researcher -> author
+//      architecture, but answers one specific question at a time and
+//      remembers the conversation. This is what the website uses.
 //
 // Each graph has its own state, because they need to remember different
-// things. The report graph comes first.
-
-//define the memory schema for the report graph
-
-const AgentState = Annotation.Root({
-    topic: Annotation<string>(), //input provided by the user
-    reportStructure: Annotation<string>(), //input provided by the user: the layout the report must follow
-    researchData: Annotation<string[]>(), //saved by Researcher, read by Author
-    report: Annotation<string>(), //saved by the author as the final output
-})
-
-// example of JSON schema converted by an AI framework:
-// {
-//   "type": "function",
-//   "function": {
-//     "name": "getStockPrice",
-//     "description": "Fetches the current stock price for a given ticker symbol.",
-//     "parameters": {
-//       "type": "object",
-//       "properties": {
-//         "ticker": {
-//           "type": "string",
-//           "description": "The stock ticker symbol (e.g., AAPL, GOOG)."
-//         }
-//       },
-//       "required": ["ticker"]
-//     }
-//   }
-// }
-
+// things. Both use dedupeSnippets, so that comes first.
 
 /**
  * Removes duplicate and near-duplicate snippets from a list of search result
@@ -99,18 +69,18 @@ function dedupeSnippets(snippets: string[]): string[] {
     return deduped;
 }
 
-// async function researcherNode(state: typeof AgentState.State) {
-//     console.log("--- RUNNING RESEARCHER PHASE ---")
+// ---------------------------------------------------------------------------
+// The REPORT graph: used from the terminal with `npm run report`.
+// ---------------------------------------------------------------------------
 
-//     const searchData = await tavilyClient.search(
-//         `detailed technical overview of ${state.topic}`,
-//         { maxResults: 3 }
-//     )
+//define the memory schema for the report graph
 
-//     const contextStrings: string[] = searchData.results?.map((res) => res.content) || [];
-
-//     return { researchData: contextStrings }
-// }
+const AgentState = Annotation.Root({
+    topic: Annotation<string>(), //input provided by the user
+    reportStructure: Annotation<string>(), //input provided by the user: the layout the report must follow
+    researchData: Annotation<string[]>(), //saved by Researcher, read by Author
+    report: Annotation<string>(), //saved by the author as the final output
+})
 
 /**
  * LangGraph node that gathers research context for the report topic.
@@ -147,21 +117,12 @@ async function researcherNode(state: typeof AgentState.State) {
     // asyncio.gather). `allSettled` (rather than `Promise.all`) is used
     // deliberately: if one query's search fails, we still get results from
     // the rest instead of the whole batch throwing.
-    
     const settledResults = await Promise.allSettled(
         queries.map((query) => (tavilyClient.search(query, {maxResults: 3})))
     )
 
     // Flatten each query's results into one list of content strings, logging
     // (but not throwing on) any query that failed.
-    // const rawSnippets: string[] = settledResults.flatMap((result, i) => {
-    //     if (result.status === "fulfilled") {
-    //         return result.value.results?.map((res) => res.content) || [];
-    //     }
-    //     console.warn(`Search failed for query "${queries[i]}":`, result.reason);
-    //     return [];
-    // });
-
     const rawSnippets: string[] = settledResults.flatMap((result, i) => {
         if(result.status === 'fulfilled') {
             return result.value.results?.map((res) => res.content) || []
@@ -191,7 +152,7 @@ async function researcherNode(state: typeof AgentState.State) {
  *   generated report text.
  */
 async function authorNode(state: typeof AgentState.State) {
-console.log("--- RUNNING AUTHOR PHASE ---")
+    console.log("--- RUNNING AUTHOR PHASE ---")
 
     // Combine the gathered snippets into a solid text block
     const context = state.researchData.join("\n\n")
@@ -237,18 +198,44 @@ Your queries should be:
     return { report: response.content as string };
 }
 
-    const workflow = new StateGraph(AgentState)
-  // 1. Mount the components as executable blocks
-  .addNode("researcher", researcherNode)
-  .addNode("author", authorNode)
+const workflow = new StateGraph(AgentState)
+    // 1. Mount the components as executable blocks
+    .addNode("researcher", researcherNode)
+    .addNode("author", authorNode)
 
-  // 2. Map out the execution path links
-  .addEdge("__start__", "researcher")
-  .addEdge("researcher", "author")
-  .addEdge("author", END);
+    // 2. Map out the execution path links
+    .addEdge("__start__", "researcher")
+    .addEdge("researcher", "author")
+    .addEdge("author", END);
 
 // 3. Compile the structural map into a runnable agent application
 const reportApp = workflow.compile();
+
+// The layout a report follows when the caller doesn't supply its own
+const DEFAULT_REPORT_STRUCTURE = `This article should be a practical clinical reference, structured as:
+1. Introduction - why nutrition matters for immunocompromised patients (1-2 paragraphs)
+2. One section per patient group (elderly, RVD/HIV, diabetes, cancer, infants and neonates, post-operative), each with key nutritional needs and foods to favour or avoid
+3. Renal and hepatic dietary restrictions
+4. Drug-nutrient interactions - a Markdown table of drug/class, food or nutrient, effect, and advice
+5. Sample Kenyan meal plan - a Markdown table covering breakfast, lunch, supper and snacks
+6. Conclusion - key safety takeaways as bullet points
+7. Sources`
+
+/**
+ * Runs the report graph (researcher -> author) for one topic and returns the
+ * finished report. Only used when this file is run from the terminal.
+ *
+ * @param topic - What the report should be about.
+ * @param reportStructure - The layout the report must follow.
+ * @returns The generated report as a Markdown string.
+ */
+async function generateReport(
+    topic: string,
+    reportStructure: string = DEFAULT_REPORT_STRUCTURE
+): Promise<string> {
+    const state = await reportApp.invoke({ topic, reportStructure })
+    return state.report
+}
 
 // ---------------------------------------------------------------------------
 // The CHAT graph: what the website uses.
@@ -269,8 +256,9 @@ type ChatTurn = {
 const ChatState = Annotation.Root({
     question: Annotation<string>(), //the message the visitor has just sent
     answer: Annotation<string>(), //the agent's reply to that message
+    researchData: Annotation<string[]>(), //saved by the chat Researcher, read by the chat Author
 
-    // The whole conversation so far. The two fields above are simply
+    // The whole conversation so far. The fields above are simply
     // overwritten when a node returns a new value, but for the history we
     // want to ADD to what is already there. A "reducer" tells LangGraph how
     // to combine the saved value with a node's update: here, by appending
@@ -281,64 +269,185 @@ const ChatState = Annotation.Root({
     }),
 })
 
-
-// How many earlier turns the chat node sends to the model with each new
-// question. A model can only read a limited amount of text per request, and
-// every extra turn makes the request slower, so we send only the most recent
-// ones. 10 turns = the last 5 questions and their 5 answers.
+// How many earlier turns are sent to the model with each new question. A
+// model can only read a limited amount of text per request, and every extra
+// turn makes the request slower, so we send only the most recent ones.
+// 10 turns = the last 5 questions and their 5 answers.
 const HISTORY_LIMIT = 10
 
 // Tavily rejects search queries longer than 400 characters.
 const MAX_SEARCH_QUERY_LENGTH = 400
 
+// The most angles the researcher will search for one question. Every angle
+// is one Tavily search, so this is also the most searches a message can cost.
+const MAX_QUERIES = 3
+
 /**
- * LangGraph node that answers one question in a conversation. Every message
- * a visitor sends on the website comes through here.
+ * Works out which searches to run for the visitor's question: one query per
+ * angle we want covered, instead of one generic query.
  *
- * It does three things:
- *   1. Runs a web search for the question, so the answer is based on real
- *      sources rather than only on what the model remembers.
- *   2. Builds a request for the model out of: instructions, the search
- *      results, the recent conversation, and finally the new question.
- *   3. Saves the model's reply and adds the exchange to the history.
+ * In the report graph the angles are a fixed list written by hand. Here they
+ * have to be DYNAMIC, because every question is different: "can a patient on
+ * warfarin eat sukuma wiki?" has a drug-interaction angle and a food angle,
+ * while "what should an elderly diabetic eat after surgery?" has three
+ * patient-group angles. So we ask the model to read the question and write
+ * the queries itself.
+ *
+ * The model also sees the recent conversation, so it can turn a follow-up
+ * like "what about spinach?" into a query that makes sense alone
+ * ("spinach and warfarin vitamin K").
+ *
+ * It is also where off-topic questions are caught. If the question is not
+ * about nutrition there is nothing worth searching for, so the model is told
+ * to reply NONE and this function returns an empty list. That saves a search
+ * we would otherwise pay for and then throw away.
+ *
+ * @param question - The message the visitor has just sent.
+ * @param recentTurns - The last few turns of the conversation, for context.
+ * @returns Up to MAX_QUERIES search queries, each a separate string. An
+ *   empty list means the question is off-topic and needs no search.
+ */
+async function planQueries(question: string, recentTurns: ChatTurn[]): Promise<string[]> {
+    const plannerPrompt = `You write web search queries for a clinical nutrition assistant. You never answer questions yourself.
+
+First, check the topic (do this before anything else):
+- The assistant only handles nutrition, food, diet, and how medicines interact with food.
+- If the user's latest question is about anything else (sport, news, politics, coding, general knowledge and so on), reply with only the single word NONE and stop. Do not write queries, code or an answer.
+
+Otherwise, read the conversation and the user's latest question, then write the search queries needed to answer it: one query per angle that should be covered, up to ${MAX_QUERIES}.
+
+Angles to consider (use only the ones that apply to this question):
+- the patient group or condition (elderly, HIV, diabetes, cancer, infants and neonates, post-operative)
+- the medicine involved and its drug-nutrient interactions
+- renal or hepatic dietary restrictions
+- suitable foods or meals, preferably Kenyan
+
+Rules:
+- Each query must cover a DIFFERENT angle. Do not write the same query in different words.
+- Each query must make sense alone. Replace words like "they", "it" or "that" with what they refer to in the conversation.
+- A simple question may need only one query.
+- Never answer the question yourself. Your only job is to write search queries.
+- Write one query per line. No numbering, no bullet points, no quotation marks, no other text.`
+
+    try {
+        const response = await model.invoke([
+            { role: "system", content: plannerPrompt },
+            ...recentTurns,
+            { role: "user", content: question },
+        ])
+        const reply = (response.content as string).trim()
+
+        // NONE is the model telling us the question is off-topic. An empty
+        // list tells the researcher to skip the search. The pattern allows
+        // for small variations such as "none" or "NONE.".
+        if (/^none\.?$/i.test(reply)) {
+            return []
+        }
+
+        // Otherwise the model replies with one query per line. Split the reply into
+        // lines, strip any numbering or bullets it added anyway, drop empty
+        // lines, and keep at most MAX_QUERIES.
+        const queries = reply
+            .split("\n")
+            .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").replace(/^["']|["']$/g, "").trim())
+            .filter((line) => line.length > 0)
+            .slice(0, MAX_QUERIES)
+            .map((query) => query.slice(0, MAX_SEARCH_QUERY_LENGTH))
+
+        if (queries.length > 0) {
+            return queries
+        }
+    } catch (error) {
+        console.warn("Could not plan search queries:", error)
+    }
+
+    // If the model failed or returned nothing usable, fall back to searching
+    // for the question exactly as it was typed, so the visitor still gets
+    // an answer.
+    return [question.slice(0, MAX_SEARCH_QUERY_LENGTH)]
+}
+
+/**
+ * LangGraph node that gathers research context for the visitor's question.
+ * This is the chat version of `researcherNode` above and works the same way:
+ *
+ * Instead of a single broad Tavily search, it fans out several targeted
+ * queries (one per angle of the question) concurrently via
+ * `Promise.allSettled`, then merges and deduplicates the results into the
+ * shared research context that `chatAuthorNode` reads.
+ *
+ * The one difference is where the queries come from: here they are written
+ * for each question by `planQueries`, instead of being a fixed list.
  *
  * @param state - Current graph state; reads `state.question` and
  *   `state.messages`.
+ * @returns A partial state update setting `researchData` to the deduplicated
+ *   list of search-result snippets. LangGraph merges this into the full
+ *   state automatically.
+ */
+async function chatResearcherNode(state: typeof ChatState.State) {
+    console.log("--- RUNNING RESEARCHER PHASE ---")
+
+    // One query per angle we want covered, instead of one generic query.
+    // Keeping these as separate strings (rather than one combined query)
+    // is what lets each be searched independently and in parallel below.
+    const queries = await planQueries(state.question, state.messages.slice(-HISTORY_LIMIT))
+    console.log("Search queries:", queries)
+
+    // No queries means the question is off-topic, so there is nothing to
+    // search for. We still return an empty researchData (rather than
+    // nothing) because the state is saved between messages: without this,
+    // the author would be handed the research from the PREVIOUS question.
+    if (queries.length === 0) {
+        return { researchData: [] }
+    }
+
+    // Fire all searches concurrently. `allSettled` (rather than
+    // `Promise.all`) is used deliberately: if one query's search fails, we
+    // still get results from the rest instead of the whole batch throwing.
+    const settledResults = await Promise.allSettled(
+        queries.map((query) => (tavilyClient.search(query, {maxResults: 3})))
+    )
+
+    // Flatten each query's results into one list of snippets, logging (but
+    // not throwing on) any query that failed. Each snippet keeps its title
+    // and link in front of its text, so the author can tell the visitor
+    // where a fact came from.
+    const rawSnippets: string[] = settledResults.flatMap((result, i) => {
+        if(result.status === 'fulfilled') {
+            return result.value.results?.map((res) => `${res.title}\nLink: ${res.url}\n${res.content.trim()}`) || []
+        }
+        console.warn(`Search failed for query"${queries[i]}":`, result.reason)
+        return []
+    })
+
+    // Different angles of the same question often surface the same source
+    // page; collapse those before handing the context to the author.
+    const contextStrings = dedupeSnippets(rawSnippets);
+
+    return { researchData: contextStrings }
+}
+
+/**
+ * LangGraph node that turns gathered research into the answer. This is the
+ * chat version of `authorNode` above.
+ *
+ * Reads the deduplicated snippets left by `chatResearcherNode` in
+ * `state.researchData`, joins them into a single context block, and asks the
+ * model to answer the visitor's question grounded in that context. Unlike
+ * the report author it writes a short, direct answer, and it also reads the
+ * recent conversation so it understands follow-up questions.
+ *
+ * @param state - Current graph state; reads `state.question`,
+ *   `state.researchData` and `state.messages`.
  * @returns A partial state update setting `answer` to the model's reply and
  *   adding the question and reply to `messages`.
  */
-async function chatNode(state: typeof ChatState.State) {
-    console.log("--- RUNNING CHAT PHASE ---")
+async function chatAuthorNode(state: typeof ChatState.State) {
+    console.log("--- RUNNING AUTHOR PHASE ---")
 
-    // 1. Search the web for the question.
-    //
-    // Follow-up questions often make no sense alone: "can they eat mangoes?"
-    // is only searchable once we know who "they" are. So if the visitor has
-    // asked something before, we put their previous question in front of the
-    // new one to give the search that context.
-    //
-    // findLast walks the history backwards and returns the most recent turn
-    // spoken by the visitor (undefined if this is their first question).
-    const previousQuestion = state.messages.findLast((turn) => turn.role === "user")?.content
-    const searchQuery = (previousQuestion ? `${previousQuestion} ${state.question}` : state.question)
-        .slice(0, MAX_SEARCH_QUERY_LENGTH)
-
-    let searchResults = "(no search results were found)"
-    try {
-        const searchData = await tavilyClient.search(searchQuery, { maxResults: 5 })
-        if (searchData.results?.length) {
-            // Number each result and keep its title and link next to its
-            // text, so the model can tell the visitor where a fact came from.
-            searchResults = searchData.results
-                .map((res, i) => `[${i + 1}] ${res.title}\nLink: ${res.url}\n${res.content.trim()}`)
-                .join("\n\n")
-        }
-    } catch (error) {
-        // A failed search should not end the conversation. The model can
-        // still answer from the history and its own knowledge, so log and
-        // carry on.
-        console.warn(`Search failed for question "${state.question}":`, error)
-    }
+    // 1. Combine the gathered snippets into a solid text block
+    const searchResults = state.researchData.join("\n\n") || "(no search results were found)"
 
     // 2a. The "system" message: instructions and background the model should
     // follow for the whole reply. The visitor never sees this text.
@@ -361,8 +470,9 @@ Safety:
 - You give general information; you are not treating a patient. When the question is about a specific person's diet or medication, end by reminding the user to confirm with their doctor, pharmacist or dietitian before changing anything.
 
 Sources:
-- If you used the search results, end with a "Sources:" list of the ones you used, each written as a Markdown link with its title, like [Title](https://link).
-- The user cannot see the search results or their numbers, so never refer to a result by its number.
+- Each search result below starts with its title, then a "Link:" line with its web address.
+- If you used the search results, end with a "Sources:" list of the ones you used. Write every source as a Markdown link made from its title and its link, exactly like this: [Title](https://link). A source without its link is not allowed.
+- Do not put source names or links inside the answer itself; they belong only in the Sources list.
 - Only use links that appear in the search results below. Never invent a link. If you did not use any, leave the Sources list out completely.
 
 SEARCH RESULTS FOR THIS QUESTION:
@@ -393,16 +503,19 @@ ${searchResults}`
     }
 }
 
-// The chat graph has a single step: every message goes to the chat node.
+// The chat graph follows the same architecture as the report graph: the
+// researcher gathers the context, then the author writes from it.
 //
-//   START -> chat -> END
+//   START -> researcher -> author -> END
 const chatWorkflow = new StateGraph(ChatState)
-  .addNode("chat", chatNode)
-  .addEdge("__start__", "chat")
-  .addEdge("chat", END);
+    .addNode("researcher", chatResearcherNode)
+    .addNode("author", chatAuthorNode)
+    .addEdge("__start__", "researcher")
+    .addEdge("researcher", "author")
+    .addEdge("author", END);
 
-// The checkpointer is the agent's memory between messages. After the chat
-// node finishes, it saves a copy of the state (including `messages`). The
+// The checkpointer is the agent's memory between messages. After each node
+// finishes, it saves a copy of the state (including `messages`). The
 // next time the graph runs for the same conversation, it loads that copy
 // first, which is how the agent "remembers" the earlier questions.
 //
@@ -413,16 +526,6 @@ const chatWorkflow = new StateGraph(ChatState)
 const checkpointer = new MemorySaver()
 
 const chatApp = chatWorkflow.compile({ checkpointer });
-
-// The layout a report follows when the caller doesn't supply its own
-const DEFAULT_REPORT_STRUCTURE = `This article should be a practical clinical reference, structured as:
-1. Introduction - why nutrition matters for immunocompromised patients (1-2 paragraphs)
-2. One section per patient group (elderly, RVD/HIV, diabetes, cancer, infants and neonates, post-operative), each with key nutritional needs and foods to favour or avoid
-3. Renal and hepatic dietary restrictions
-4. Drug-nutrient interactions - a Markdown table of drug/class, food or nutrient, effect, and advice
-5. Sample Kenyan meal plan - a Markdown table covering breakfast, lunch, supper and snacks
-6. Conclusion - key safety takeaways as bullet points
-7. Sources`
 
 // How long a conversation may sit unused before it is forgotten, and how
 // often we check. Without this, saved conversations would pile up in RAM for
@@ -475,34 +578,23 @@ export async function sendMessage(threadId: string, message: string): Promise<st
     return state.answer
 }
 
-/**
- * Runs the report graph (researcher -> author) for one topic and returns the
- * finished report. Only used when this file is run from the terminal.
- *
- * @param topic - What the report should be about.
- * @param reportStructure - The layout the report must follow.
- * @returns The generated report as a Markdown string.
- */
-async function generateReport(
-    topic: string,
-    reportStructure: string = DEFAULT_REPORT_STRUCTURE
-): Promise<string> {
-    const state = await reportApp.invoke({ topic, reportStructure })
-    return state.report
-}
+// ---------------------------------------------------------------------------
+// Running this file from the terminal: writes the one-off report.
+// ---------------------------------------------------------------------------
 
 async function runAgent() {
-  const report = await generateReport("Nutrition for immuno compromised patients")
+    const report = await generateReport("Nutrition for immuno compromised patients")
 
-  console.log("\n====== GENERATED REPORT ======\n");
-  console.log(report);
+    console.log("\n====== GENERATED REPORT ======\n");
+    console.log(report);
 
-  // A terminal can't render Markdown the way a notebook's Markdown() does,
-  // so also save the report to a file that can be opened in a previewer.
-  await writeFile("report.md", report);
-  console.log("\nReport saved to report.md");
-  // Convert the Markdown to HTML so it can be opened in a browser
-  const html = `<!doctype html>
+    // A terminal can't render Markdown the way a notebook's Markdown() does,
+    // so also save the report to a file that can be opened in a previewer.
+    await writeFile("report.md", report);
+    console.log("\nReport saved to report.md");
+
+    // Convert the Markdown to HTML so it can be opened in a browser
+    const html = `<!doctype html>
     <meta charset="utf-8">
     <title>Report</title>
     <body style="max-width: 850px; margin: 2rem auto; font-family: sans-serif">
@@ -518,4 +610,3 @@ async function runAgent() {
 if (require.main === module) {
     runAgent();
 }
-
