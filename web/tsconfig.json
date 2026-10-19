@@ -1,0 +1,24 @@
+{
+  // TypeScript settings for the website only. The server code in the folder
+  // above uses its own tsconfig.json, because code that runs in a browser
+  // needs different settings from code that runs in Node.
+  "compilerOptions": {
+    "target": "esnext",
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+
+    // Vite builds the files; TypeScript only checks them for mistakes.
+    "noEmit": true
+  },
+  "include": ["src"]
+}

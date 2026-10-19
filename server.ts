@@ -14,9 +14,10 @@ server.set("trust proxy", 1)
 // This one reads a JSON request body and puts it on req.body.
 server.use(express.json())
 
-// This one serves the files in the public/ folder, so visiting the site's
-// address returns public/index.html.
-server.use(express.static("public"))
+// This one serves the built website. "npm run build" turns the React code in
+// web/ into plain files in web/dist, so visiting the site's address returns
+// web/dist/index.html.
+server.use(express.static("web/dist"))
 
 // The longest message a visitor may send.
 const MAX_MESSAGE_LENGTH = 300

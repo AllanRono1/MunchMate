@@ -278,9 +278,40 @@ const HISTORY_LIMIT = 10
 // Tavily rejects search queries longer than 400 characters.
 const MAX_SEARCH_QUERY_LENGTH = 400
 
-// The most angles the researcher will search for one question. Every angle
-// is one Tavily search, so this is also the most searches a message can cost.
+// The most searches the researcher will run for one question. Every search
+// is one Tavily request, so this is also the most a message can cost.
 const MAX_QUERIES = 3
+
+// One of those searches is always the Kenyan one (see KENYAN_DOMAINS), so
+// the planner may write one fewer than the total.
+const MAX_PLANNED_QUERIES = MAX_QUERIES - 1
+
+// The Kenyan search only looks at these sites. A normal web search for a
+// food question mostly returns American and British pages, which describe
+// foods and portions a Kenyan patient may not recognise. These are the
+// Kenyan government and research bodies that publish nutrition guidance
+// (for example the Ministry of Health's National Guidelines for Healthy
+// Diets and the Kenya Food Composition Tables), plus the FAO, which
+// co-publishes several of them.
+const KENYAN_DOMAINS = [
+    "health.go.ke", //Ministry of Health
+    "familyhealth.go.ke", //Ministry of Health, Division of Family Health
+    "kilimo.go.ke", //Ministry of Agriculture
+    "kemri.go.ke", //Kenya Medical Research Institute
+    "fao.org", //Food and Agriculture Organization
+]
+
+// Put on the first line of every snippet that came from the Kenyan search,
+// so the author can tell Kenyan sources apart from the rest.
+const KENYAN_LABEL = "[Kenyan source]"
+
+// Tavily scores every result from 0 (unrelated) to 1 (a close match). The
+// Kenyan search is limited to a handful of sites, so when none of them
+// covers the question it still returns its "best" pages, which can be about
+// something else entirely (a farming factsheet for a warfarin question).
+// Results below this score are dropped, so that an unrelated page is never
+// passed to the author as Kenyan evidence.
+const MIN_KENYAN_SCORE = 0.4
 
 /**
  * Works out which searches to run for the visitor's question: one query per
@@ -304,7 +335,7 @@ const MAX_QUERIES = 3
  *
  * @param question - The message the visitor has just sent.
  * @param recentTurns - The last few turns of the conversation, for context.
- * @returns Up to MAX_QUERIES search queries, each a separate string. An
+ * @returns Up to MAX_PLANNED_QUERIES search queries, each a separate string. An
  *   empty list means the question is off-topic and needs no search.
  */
 async function planQueries(question: string, recentTurns: ChatTurn[]): Promise<string[]> {
@@ -314,7 +345,7 @@ First, check the topic (do this before anything else):
 - The assistant only handles nutrition, food, diet, and how medicines interact with food.
 - If the user's latest question is about anything else (sport, news, politics, coding, general knowledge and so on), reply with only the single word NONE and stop. Do not write queries, code or an answer.
 
-Otherwise, read the conversation and the user's latest question, then write the search queries needed to answer it: one query per angle that should be covered, up to ${MAX_QUERIES}.
+Otherwise, read the conversation and the user's latest question, then write the search queries needed to answer it: one query per angle that should be covered, up to ${MAX_PLANNED_QUERIES}. Put the most important angle first.
 
 Angles to consider (use only the ones that apply to this question):
 - the patient group or condition (elderly, HIV, diabetes, cancer, infants and neonates, post-operative)
@@ -346,12 +377,12 @@ Rules:
 
         // Otherwise the model replies with one query per line. Split the reply into
         // lines, strip any numbering or bullets it added anyway, drop empty
-        // lines, and keep at most MAX_QUERIES.
+        // lines, and keep at most MAX_PLANNED_QUERIES.
         const queries = reply
             .split("\n")
             .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").replace(/^["']|["']$/g, "").trim())
             .filter((line) => line.length > 0)
-            .slice(0, MAX_QUERIES)
+            .slice(0, MAX_PLANNED_QUERIES)
             .map((query) => query.slice(0, MAX_SEARCH_QUERY_LENGTH))
 
         if (queries.length > 0) {
@@ -376,8 +407,10 @@ Rules:
  * `Promise.allSettled`, then merges and deduplicates the results into the
  * shared research context that `chatAuthorNode` reads.
  *
- * The one difference is where the queries come from: here they are written
- * for each question by `planQueries`, instead of being a fixed list.
+ * There are two differences. The queries are written for each question by
+ * `planQueries`, instead of being a fixed list. And one extra search is run
+ * on Kenyan sites only, so the author has local guidance to draw on and can
+ * tell the visitor when there was none.
  *
  * @param state - Current graph state; reads `state.question` and
  *   `state.messages`.
@@ -398,26 +431,48 @@ async function chatResearcherNode(state: typeof ChatState.State) {
     // search for. We still return an empty researchData (rather than
     // nothing) because the state is saved between messages: without this,
     // the author would be handed the research from the PREVIOUS question.
-    if (queries.length === 0) {
+    const mainQuery = queries[0]
+    if (mainQuery === undefined) {
         return { researchData: [] }
     }
+
+    // The Kenyan search: the most important angle again, but this time only
+    // on Kenyan sites. The planner puts the most important angle first, so
+    // that is mainQuery. Room is left for the word "Kenya" so that adding
+    // it never pushes the query over Tavily's length limit.
+    const kenyanQuery = `${mainQuery.slice(0, MAX_SEARCH_QUERY_LENGTH - " Kenya".length)} Kenya`
+
+    const searches = [
+        ...queries.map((query) => ({ query, kenyan: false })),
+        { query: kenyanQuery, kenyan: true },
+    ]
 
     // Fire all searches concurrently. `allSettled` (rather than
     // `Promise.all`) is used deliberately: if one query's search fails, we
     // still get results from the rest instead of the whole batch throwing.
     const settledResults = await Promise.allSettled(
-        queries.map((query) => (tavilyClient.search(query, {maxResults: 3})))
+        searches.map(({ query, kenyan }) => (tavilyClient.search(query, {
+            maxResults: 3,
+            ...(kenyan ? { includeDomains: KENYAN_DOMAINS } : {}),
+        })))
     )
+    const kenyanIndex = searches.length - 1 //the Kenyan search is the last one
 
     // Flatten each query's results into one list of snippets, logging (but
     // not throwing on) any query that failed. Each snippet keeps its title
     // and link in front of its text, so the author can tell the visitor
-    // where a fact came from.
+    // where a fact came from. Snippets from the Kenyan search also get
+    // KENYAN_LABEL as their first line, and are kept only if they are
+    // relevant enough (see MIN_KENYAN_SCORE).
     const rawSnippets: string[] = settledResults.flatMap((result, i) => {
         if(result.status === 'fulfilled') {
-            return result.value.results?.map((res) => `${res.title}\nLink: ${res.url}\n${res.content.trim()}`) || []
+            const kenyan = i === kenyanIndex
+            const label = kenyan ? `${KENYAN_LABEL}\n` : ""
+            return result.value.results
+                ?.filter((res) => !kenyan || res.score >= MIN_KENYAN_SCORE)
+                .map((res) => `${label}${res.title}\nLink: ${res.url}\n${res.content.trim()}`) || []
         }
-        console.warn(`Search failed for query"${queries[i]}":`, result.reason)
+        console.warn(`Search failed for query"${searches[i]?.query}":`, result.reason)
         return []
     })
 
@@ -449,6 +504,11 @@ async function chatAuthorNode(state: typeof ChatState.State) {
     // 1. Combine the gathered snippets into a solid text block
     const searchResults = state.researchData.join("\n\n") || "(no search results were found)"
 
+    // Whether the Kenyan search found anything. We work this out here and
+    // tell the model outright, instead of leaving it to notice the labels,
+    // so it cannot overlook that an answer has no Kenyan source behind it.
+    const hasKenyanSource = state.researchData.some((snippet) => snippet.startsWith(KENYAN_LABEL))
+
     // 2a. The "system" message: instructions and background the model should
     // follow for the whole reply. The visitor never sees this text.
     const systemPrompt = `You are a careful clinical nutrition assistant. You help with nutrition for immunocompromised patients (elderly, HIV, diabetes, cancer, infants and neonates, post-operative, and patients on medicines such as Revlimid, Velcade and dexamethasone) and with drug-nutrient interactions.
@@ -461,16 +521,26 @@ How to answer:
 - Answer the specific question the user asked, directly and first. Do not write a report or cover topics they did not ask about.
 - Keep it short: a few sentences or a short bullet list. Give more detail only if the user asks for it.
 - Use Markdown. Use a table only when the user asks for a meal plan or a comparison. Do not use emojis.
-- Base your answer on the search results below. If they do not cover the question, say what is uncertain instead of guessing.
+- Base your answer on the search results below.
 - When you suggest foods or meals, prefer Kenyan foods that are affordable and easy to find.
 - If the answer depends on something you were not told (for example the patient's medicines, kidney or liver function, age or allergies), give the general answer and then ask for the one detail that matters most.
+
+Gaps in the evidence (the user is a patient and must be able to see these):
+- Before you write, compare the search results with the question. Check whether they cover the exact food and the exact medicine or condition the user asked about.
+- If they cover it, answer normally and add nothing about gaps.
+- If they only cover something related (for example kale or "leafy greens" when the user asked about sukuma wiki or managu, or a medicine class instead of the named medicine), you may answer from that, but you must say so.
+- If they do not cover the question at all, say that you found no reliable source for it and stop there. Do not fill the gap from your own memory. Tell the user to ask their doctor, pharmacist or dietitian.
+- Results that start with "${KENYAN_LABEL}" come from Kenyan government or research bodies. ${hasKenyanSource ? "Prefer them when they are relevant to the question. If none of them is relevant, treat this answer as having no Kenyan source." : "No Kenyan source was found for this question."}
+- If the question involves a Kenyan food or a meal plan and the answer has no Kenyan source behind it, say that it is based on international sources and may not match how the food is grown, prepared or served in Kenya.
+- Put every gap in one short paragraph that starts with "**What I could not confirm:**", placed after the answer and before the Sources list. Name the specific thing that is missing.
+- When there is no gap, do not write that paragraph or its heading at all. Never write it only to say that nothing is missing.
 
 Safety:
 - Safety is key. Mention relevant drug-nutrient interactions (grapefruit family, vitamin K consistency, tyramine, potassium, sodium, St John's Wort, calcium/iron timing, CYP450 inducers and inhibitors) and renal or hepatic restrictions when they apply to the question.
 - You give general information; you are not treating a patient. When the question is about a specific person's diet or medication, end by reminding the user to confirm with their doctor, pharmacist or dietitian before changing anything.
 
 Sources:
-- Each search result below starts with its title, then a "Link:" line with its web address.
+- Each search result below starts with its title (after the "${KENYAN_LABEL}" line, if it has one), then a "Link:" line with its web address. Never copy "${KENYAN_LABEL}" into your answer.
 - If you used the search results, end with a "Sources:" list of the ones you used. Write every source as a Markdown link made from its title and its link, exactly like this: [Title](https://link). A source without its link is not allowed.
 - Do not put source names or links inside the answer itself; they belong only in the Sources list.
 - Only use links that appear in the search results below. Never invent a link. If you did not use any, leave the Sources list out completely.

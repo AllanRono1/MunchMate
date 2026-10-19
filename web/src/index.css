@@ -1,0 +1,37 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400;1,500&family=Gelasio:ital,wght@0,400..700;1,400..700&family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=Monoton&family=Spectral:ital,wght@0,200;0,300;0,400;0,500;0,600;0,700;0,800;1,200;1,300;1,400;1,500;1,600;1,700;1,800&display=swap');
+
+/* Loads Tailwind: the class names used in the .tsx files (like "flex" or
+   "rounded-xl") come from here. */
+@import "tailwindcss";
+
+/* Adds the "prose" class, which styles headings, lists and tables in the
+   agent's answers. Tailwind removes the browser's default styles for those,
+   so without this an answer would look like one flat block of text. */
+@plugin "@tailwindcss/typography";
+
+/* Our own colours. Each one becomes a set of classes, for example
+   --color-brand gives bg-brand, text-brand and border-brand. */
+@theme {
+    --color-white: #FFFFFF;
+    --color-gray-500: #4E4E4E;
+    --color-gray-400: #7A7A7A;
+    --color-gray-300: #A7A7A7;
+    --color-gray-200: #D3D3D3;
+    --color-gray-100: #E9E9E9;
+    --color-cream: #FDFBF7;
+    --color-dark-blue: #2850D2;
+    --color-blue-500: #2B5CFF;
+    --color-blue-400: #557DFF;
+    --color-blue-300: #809DFF;
+    --color-blue-200: #94ADFF;
+    --color-blue-100: #D5DEFF;
+    --color-blue-50: #EAEFFF;
+    --color-black: #1C1C1C;
+    --color-brand-soft: #eef3f0;
+    --color-ink: #1c2b24;
+    --color-muted: #4d5f56;
+    --color-line: #dde5e0;
+    --color-page: #f6f8f6;
+    --font-inter: "Inter", sans-serif;
+    --font-spectral: "Spectral", san-serif;
+}

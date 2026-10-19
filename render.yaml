@@ -1,0 +1,23 @@
+# Tells Render how to run MunchMate. In Render choose New -> Blueprint and
+# pick this repository; Render reads this file and creates the service.
+services:
+  - type: web
+    name: munchmate
+    runtime: node
+    plan: free
+    # Install every package, then turn the React code in web/ into the plain
+    # files in web/dist that the server sends to browsers.
+    buildCommand: npm install && npm run build
+    # Start the Express server (server.ts), which serves web/dist and /api/chat.
+    startCommand: npm start
+    # Render checks this address after each deploy to make sure the site is up.
+    healthCheckPath: /
+    # Redeploy every time main is pushed to GitHub.
+    autoDeploy: true
+    envVars:
+      # sync: false means Render asks for these values when you create the
+      # service, so the keys never have to be stored in the repository.
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
