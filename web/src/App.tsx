@@ -25,44 +25,40 @@ const EXAMPLE_QUESTIONS = [
 ]
 
 export default function App() {
-    // Step 1: the conversation (messages, loading, errors), kept by useChat.
+    // The conversation (messages, loading, errors), kept by useChat.
     const chat = useChat()
 
-    // Step 2: which screen to show. false = the landing page, true = the chat.
+    // Which screen to show. false = the landing page, true = the chat.
     const [chatOpen, setChatOpen] = useState(false)
 
     // What the visitor is typing in the landing page box.
     const [draft, setDraft] = useState("")
 
-    // Step 3: make the browser's Back button leave the chat. When the chat
-    // opens we add an entry to the browser history (see openChat below).
-    // Pressing Back removes it and fires a "popstate" event, which we answer
-    // by going back to the landing page.
+    // Make the browser's Back button leave the chat: opening the chat adds a
+    // history entry, and pressing Back fires "popstate", which closes it.
     useEffect(() => {
         const handleBack = () => setChatOpen(false)
         window.addEventListener("popstate", handleBack)
-        // Clean-up: React runs this if App is ever removed from the page.
         return () => window.removeEventListener("popstate", handleBack)
     }, [])
 
-    // Step 4: open the chat screen with the visitor's first question.
+    // Open the chat screen and send the visitor's first question.
     function openChat(question: string) {
         chat.reset() // start a brand new conversation
         setChatOpen(true) // swap the landing page for the chat screen
         window.history.pushState({ chat: true }, "") // so Back returns here
-        window.scrollTo(0, 0) // the chat starts at the top of the screen
-        chat.send(question) // send the question to the agent
+        window.scrollTo(0, 0)
+        chat.send(question)
     }
 
-    // Step 5: leave the chat ("New chat" button or the logo). Going back in
-    // history fires the popstate event above, which hides the chat.
+    // Leave the chat ("New chat" or the logo). Going back fires popstate.
     function closeChat() {
         window.history.back()
     }
 
-    // Step 6: the landing page form was submitted (arrow button or Enter).
+    // The landing page form was submitted (arrow button or Enter).
     function handleLandingSubmit(event: FormEvent<HTMLFormElement>) {
-        // Without this the browser would reload the page, its default for forms.
+        // Without this the browser would reload the page.
         event.preventDefault()
         const question = draft.trim()
         if (!question) return
@@ -70,7 +66,7 @@ export default function App() {
         openChat(question)
     }
 
-    // Step 7: while the chat is open, show only the chat screen.
+    // While the chat is open, show only the chat screen.
     if (chatOpen) {
         return (
             <ChatView
@@ -83,7 +79,6 @@ export default function App() {
         )
     }
 
-    // Otherwise, show the landing page below.
     const patientData = data.map(patient => {
         return <Stats key={patient.id} record={patient.record} unit={patient.unit} title={patient.title} description={patient.description}/>
     })
@@ -108,13 +103,11 @@ export default function App() {
                 <div className="absolute bottom-3 max-w-[98.5%] mx-auto">
                     <h1 className=" text-white text-2xl/7 tracking-tight font-medium">A new level of confidence when eating with your medication</h1>
                     <p className="text-cream text-sm/4 py-4">Whatever you're eating with your medication, start here.</p>
-                    {/* Step 8: the landing page box. value + onChange keep the
-                        typed text in `draft`; submitting runs handleLandingSubmit. */}
                     <form className="relative" onSubmit={handleLandingSubmit}>
                         <label>
                             <span className="sr-only">Your question</span>
                             <textarea
-                                className="pt-3 py-14 px-4 bg-white border border-2 border-solid border-black rounded-3xl text-sm w-[98.5%]"
+                                className="pt-3 py-14 px-4 bg-white border-2 border-solid border-black rounded-3xl text-sm w-[98.5%]"
                                 placeholder={EXAMPLE_QUESTIONS[2]}
                                 value={draft}
                                 onChange={(event) => setDraft(event.target.value)}
@@ -122,7 +115,7 @@ export default function App() {
                                 maxLength={MAX_MESSAGE_LENGTH}
                             ></textarea>
                         </label>
-                        <button type="submit" disabled={!draft.trim()} className="disabled:opacity-60 arrow-btn p-2 text-white absolute right-4 bottom-2 bg-black border border-1 border-solid border-blue rounded-4xl" aria-label="Send">
+                        <button type="submit" disabled={!draft.trim()} className="disabled:opacity-60 arrow-btn p-2 text-white absolute right-4 bottom-2 bg-black border border-solid border-blue rounded-4xl" aria-label="Send">
                         <svg 
                         viewBox="0 0 24 24" 
                         width="20" 

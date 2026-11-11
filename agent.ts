@@ -1,40 +1,56 @@
 import { StateGraph, Annotation, END, MemorySaver } from "@langchain/langgraph"
 import { ChatOpenAI } from "@langchain/openai"
+import { ToolMessage, type BaseMessageLike } from "@langchain/core/messages"
 import { tavily } from "@tavily/core"
 import * as dotenv from "dotenv"
-import { writeFile } from "node:fs/promises"
-import { marked } from "marked"
 
 //used to read content of .env file and loads its key-value pair into the
 //  process.env so that the rest of the code can read them
+
 dotenv.config()
 
-if (!process.env.TAVILY_API_KEY) {
+if(!process.env.TAVILY_API_KEY) {
     throw new Error("TAVILY_API_KEY is not set")
 }
+//save the tavily api key as a key-value pair inside an object
 
-const tavilyClient = tavily({ apiKey: process.env.TAVILY_API_KEY })
+const tavilyClient = tavily({apiKey: process.env.TAVILY_API_KEY})
 
 // Connect to the OpenRouter Nemotron endpoint. The ":free" at the end of the
 // model name is what selects the free version; without it OpenRouter charges
 // for each request. Created once here so that both graphs share the same
 // model.
-const model = new ChatOpenAI({
-    configuration: { baseURL: "https://openrouter.ai/api/v1" },
+// export const model = new ChatOpenAI({
+//     configuration: { baseURL: "https://openrouter.ai/api/v1" },
+//     modelName: "nvidia/nemotron-3-super-120b-a12b:free",
+//     apiKey: process.env.OPENROUTER_API_KEY
+//})
+
+//"https://openrouter.ai/api/v1"
+//"nvidia/nemotron-3-super-120b-a12b:free"
+
+
+
+export const model = new ChatOpenAI({
+    configuration: {baseURL: "https://openrouter.ai/api/v1"},
     modelName: "nvidia/nemotron-3-super-120b-a12b:free",
     apiKey: process.env.OPENROUTER_API_KEY
 })
 
-// This file holds two separate graphs:
+
+// The project has two separate graphs:
 //
-//   1. The REPORT graph (researcher -> author). It writes one long report
-//      and is only used from the terminal, with `npm run report`.
-//   2. The CHAT graph. It follows the same researcher -> author
+//   1. The REPORT graph (researcher -> author), in report.ts. It writes one
+//      long report and is only used from the terminal, with `npm run report`.
+//   2. The CHAT graph, in this file. It follows the same researcher -> author
 //      architecture, but answers one specific question at a time and
 //      remembers the conversation. This is what the website uses.
 //
-// Each graph has its own state, because they need to remember different
-// things. Both use dedupeSnippets, so that comes first.
+// In both graphs the researcher component of the agent implements the reasoning and action pattern (see `research` below):
+// the model thinks what to do, takes action(decides what to search for), reads the results, and decides
+// the next steps based on the results. Each graph has its own state, because they need
+// to remember different things. The search tools and the ReAct loop are
+// shared, so they come first and are exported for report.ts.
 
 /**
  * Removes duplicate and near-duplicate snippets from a list of search result
@@ -59,7 +75,8 @@ function dedupeSnippets(snippets: string[]): string[] {
         // Normalize before comparing: lowercase + collapsed whitespace means
         // two snippets that differ only by capitalization or line breaks are
         // still treated as the same underlying content.
-        const key = snippet.trim().toLowerCase().replace(/\s+/g, " ");
+        // const key = snippet.trim().toLowerCase().replace(/\s+/g, " ");
+        const key = snippet.trim().toLowerCase().replace(/\s+/g, " ")
         if (key && !seen.has(key)) {
             seen.add(key);
             deduped.push(snippet.trim());
@@ -69,172 +86,249 @@ function dedupeSnippets(snippets: string[]): string[] {
     return deduped;
 }
 
-// ---------------------------------------------------------------------------
-// The REPORT graph: used from the terminal with `npm run report`.
-// ---------------------------------------------------------------------------
+// Tavily rejects search queries longer than 400 characters.
+const MAX_SEARCH_QUERY_LENGTH = 400
 
-//define the memory schema for the report graph
+// How many results each search asks Tavily for.
+const RESULTS_PER_SEARCH = 3
 
-const AgentState = Annotation.Root({
-    topic: Annotation<string>(), //input provided by the user
-    reportStructure: Annotation<string>(), //input provided by the user: the layout the report must follow
-    researchData: Annotation<string[]>(), //saved by Researcher, read by Author
-    report: Annotation<string>(), //saved by the author as the final output
-})
+// The most times the researcher may go round its loop (think, search, read
+// the results) for one question or report. The search limit normally ends
+// the loop first; this is a backstop in case the model keeps asking for
+// searches that are never run (for example with an empty query).
+const MAX_RESEARCH_ROUNDS = 6
 
-/**
- * LangGraph node that gathers research context for the report topic.
- *
- * Instead of a single broad Tavily search, this fans out several targeted
- * queries (one per patient category / interaction concern) concurrently via
- * `Promise.allSettled`, then merges and deduplicates the results into the
- * shared research context that `authorNode` reads.
- *
- * @param state - Current graph state; only `state.topic` is read here.
- * @returns A partial state update setting `researchData` to the deduplicated
- *   list of search-result snippets. LangGraph merges this into the full
- *   state automatically.
- */
-async function researcherNode(state: typeof AgentState.State) {
-    console.log("--- RUNNING RESEARCHER PHASE ---")
+// The Kenyan search only looks at these sites. A normal web search for a
+// food question mostly returns American and British pages, which describe
+// foods and portions a Kenyan patient may not recognise. These are the
+// Kenyan government and research bodies that publish nutrition guidance
+// (for example the Ministry of Health's National Guidelines for Healthy
+// Diets and the Kenya Food Composition Tables), plus the FAO, which
+// co-publishes several of them.
+const KENYAN_DOMAINS = [
+    "health.go.ke", //Ministry of Health
+    "familyhealth.go.ke", //Ministry of Health, Division of Family Health
+    "kilimo.go.ke", //Ministry of Agriculture
+    "kemri.go.ke", //Kenya Medical Research Institute
+    "fao.org", //Food and Agriculture Organization
+]
 
-    // One query per angle we want covered, instead of one generic query.
-    // Keeping these as separate strings (rather than one combined query)
-    // is what lets each be searched independently and in parallel below.
-    const queries = [
-        `${state.topic}: nutrition considerations for elderly patients`,
-        `${state.topic}: nutrition considerations for Revlimid (lenalidomide), Velcade (bortezomib), and dexamethasone patients`,
-        `${state.topic}: nutrition considerations for HIV patients`,
-        `${state.topic}: nutrition considerations for diabetes patients`,
-        `${state.topic}: nutrition considerations for cancer patients`,
-        `${state.topic}: nutrition considerations for infants and neonates`,
-        `${state.topic}: nutrition considerations for post-operative patients`,
-        `${state.topic}: renal and hepatic dietary restrictions`,
-        `${state.topic}: drug-nutrient interactions (grapefruit, vitamin K, tyramine, CYP450 inducers/inhibitors)`,
-    ]
+// Put on the first line of every snippet that came from the Kenyan search,
+// so the author can tell Kenyan sources apart from the rest.
+export const KENYAN_LABEL = "[Kenyan source]"
 
-    // Fire all searches concurrently (JS/TS equivalent of Python's
-    // asyncio.gather). `allSettled` (rather than `Promise.all`) is used
-    // deliberately: if one query's search fails, we still get results from
-    // the rest instead of the whole batch throwing.
-    const settledResults = await Promise.allSettled(
-        queries.map((query) => (tavilyClient.search(query, {maxResults: 3})))
-    )
+// Tavily scores every result from 0 (unrelated) to 1 (a close match). The
+// Kenyan search is limited to a handful of sites, so when none of them
+// covers the question it still returns its "best" pages, which can be about
+// something else entirely (a farming factsheet for a warfarin question).
+// Results below this score are dropped, so that an unrelated page is never
+// passed to the author as Kenyan evidence.
+const MIN_KENYAN_SCORE = 0.4
 
-    // Flatten each query's results into one list of content strings, logging
-    // (but not throwing on) any query that failed.
-    const rawSnippets: string[] = settledResults.flatMap((result, i) => {
-        if(result.status === 'fulfilled') {
-            return result.value.results?.map((res) => res.content) || []
+// The tools the researcher can call, written in the format the model
+// expects. The model never runs a search itself: it replies with a "tool
+// call" naming one of these tools and the query it wants, and `research`
+// runs the search and sends the results back to it.
+export const WEB_SEARCH_TOOL = "web_search"
+export const KENYAN_SEARCH_TOOL = "search_kenyan_sources"
+
+const SEARCH_TOOLS = [
+    {
+        type: "function" as const,
+        function: {
+            name: WEB_SEARCH_TOOL,
+            description: "Search the whole web. Returns the title, link and text of the top results.",
+            parameters: {
+                type: "object",
+                properties: {
+                    query: { 
+                        type: "string", 
+                        description: "A specific search query that makes sense on its own."
+                     },
+                },
+                required: ["query"],
+            },
+        },
+    },
+    {
+        type: "function" as const,
+        function: {
+            name: KENYAN_SEARCH_TOOL,
+            description: "Search Kenya's domain. Return the title, link and text of the top results",
+            parameter: {
+                type: "object",
+                properties: {
+                    query: {
+                        type: "string",
+                        description: "A specific search query that makes sense on its own"
+                    }
+                },
+                required: ["query"]
+            }
         }
-        console.warn(`Search failed for query"${queries[i]}":`, result.reason)
-        return []
+    },
+]
+
+// The same model, but told about the search tools, so it can ask for them.
+const researcherModel = model.bindTools(SEARCH_TOOLS)
+
+/**
+ * Runs one Tavily search and turns the results into snippets for the
+ * author. Each snippet keeps its title and link in front of its text, so
+ * the author can tell the reader where a fact came from. Snippets from the
+ * Kenyan search also get KENYAN_LABEL as their first line, and are kept only
+ * if they are relevant enough (see MIN_KENYAN_SCORE).
+ *
+ * @param query - What to search for.
+ * @param kenyan - Whether to search only the Kenyan sites.
+ * @returns The snippets, best match first. Empty if nothing was found.
+ */
+async function search(query: string, kenyan: boolean): Promise<string[]> {
+    const response = await tavilyClient.search(query.slice(0, MAX_SEARCH_QUERY_LENGTH), {
+        maxResults: RESULTS_PER_SEARCH,
+        ...(kenyan ? { includeDomains: KENYAN_DOMAINS } : {}),
     })
+    const label = kenyan ? `${KENYAN_LABEL}\n` : ""
+    return response.results
+        ?.filter((res) => !kenyan || res.score >= MIN_KENYAN_SCORE)
+        .map((res) => `${label}${res.title}\nLink: ${res.url}\n${res.content.trim()}`) || []
+}
 
-    // Overlapping queries can surface the same source twice; collapse those
+/**
+ * The researcher, as a ReAct agent ("reason + act"). Both graphs' researcher
+ * nodes call this; they only differ in the instructions they give it.
+ *
+ * It works in rounds:
+ *   1. Reason: the model reads the task (and every result so far) and
+ *      decides what is still missing. It answers with one or more tool
+ *      calls, each one a search it wants run.
+ *   2. Act: we run those searches (at the same time) and send the results
+ *      back to the model as "tool" messages.
+ *   3. Repeat, until the model stops asking for searches because it has
+ *      enough, or the search limit is reached.
+ *
+ * The model's own final words are not used: the author writes from the
+ * snippets the searches returned, not from the researcher's summary of them.
+ *
+ * The loop runs inside this one function, rather than as a loop of nodes in
+ * the graph, so its working notes (the tool calls and results) are thrown
+ * away when it finishes. In the chat graph, anything in the graph state is
+ * saved between messages, and these notes are not worth keeping.
+ *
+ * One search is always kept back for the Kenyan sites. If the model never
+ * searched them itself, its first web query is run again there, so the
+ * author always has local guidance to draw on (or knows there was none).
+ *
+ * @param instructions - The system prompt: what to research and how.
+ * @param conversation - The messages that state the task (for the chat, the
+ *   recent conversation followed by the new question).
+ * @param maxSearches - The most searches to run, including the Kenyan one.
+ *   Every search is one Tavily request, so this is also the most it costs.
+ * @param fallbackQuery - What to search for if the model fails before it
+ *   searches anything, so the author still has something to work from.
+ * @returns The deduplicated snippets from every search that was run. Empty
+ *   if the model decided no search was needed.
+ */
+export async function research(
+    instructions: string,
+    conversation: BaseMessageLike[],//(union type - allows loose and flexible shorthand inputs) rep an array of objects that can be converted to chat messages
+    maxSearches: number,
+    fallbackQuery: string
+): Promise<string[]> {
+    // Everything the model has seen so far. It grows each round with the
+    // model's tool calls and the results we send back.
+    const messages: BaseMessageLike[] = [{ role: "system", content: instructions }, ...conversation]
+
+    const snippets: string[] = []
+    const searchesRun: { query: string, kenyan: boolean }[] = []
+    let searchesLeft = maxSearches - 1 //one is kept back for the Kenyan search
+    let modelFailed = false
+
+    for (let round = 0; round < MAX_RESEARCH_ROUNDS && searchesLeft > 0; round++) {
+        // 1. Reason: ask the model what to search for next.
+        let response
+        try {
+            response = await researcherModel.invoke(messages)
+        } catch (error) {
+            console.warn("The researcher model failed:", error)
+            modelFailed = true
+            break
+        }
+
+        // No tool calls means the model has decided it has enough.
+        const toolCalls = response.tool_calls ?? []
+        if (toolCalls.length === 0) {
+            break
+        }
+        messages.push(response)
+
+        // 2. Act: run every search it asked for. Each call is checked first,
+        // and given its place in the search limit, before any of them start.
+        const results = await Promise.all(toolCalls.map(async (call) => {
+            const query = typeof call.args.query === "string" ? call.args.query.trim() : ""
+            const kenyan = call.name === KENYAN_SEARCH_TOOL
+
+            if (call.name !== WEB_SEARCH_TOOL && !kenyan) {
+                return `Not run: there is no tool called "${call.name}".`
+            }
+            if (!query) {
+                return "Not run: the query was empty."
+            }
+            if (searchesLeft === 0) {
+                return "Not run: the search limit has been reached."
+            }
+            searchesLeft--
+            searchesRun.push({ query, kenyan })
+            console.log(`Search (${call.name}):`, query)
+
+            try {
+                const found = await search(query, kenyan)
+                snippets.push(...found)
+                return found.join("\n\n") || "No relevant results were found."
+            } catch (error) {
+                console.warn(`Search failed for query "${query}":`, error)
+                return "The search failed."
+            }
+        }))
+
+        // 3. Send the results back, so the model can read them next round.
+        // Each result has to name the tool call it answers.
+        toolCalls.forEach((call, i) => {
+            messages.push(new ToolMessage({ tool_call_id: call.id ?? "", content: results[i] ?? "" }))
+        })
+    }
+
+    // If the model broke before it could search anything, search for the
+    // task exactly as it was given, so the author still has an answer to
+    // work from.
+    if (modelFailed && searchesRun.length === 0) {
+        searchesRun.push({ query: fallbackQuery, kenyan: false })
+        console.log(`Search (${WEB_SEARCH_TOOL}, fallback):`, fallbackQuery)
+        try {
+            snippets.push(...await search(fallbackQuery, false))
+        } catch (error) {
+            console.warn(`Search failed for query "${fallbackQuery}":`, error)
+        }
+    }
+
+    // The search that was kept back: if the model searched the web but never
+    // the Kenyan sites, run its first web query again on them. Room is left
+    // for the word "Kenya" so that adding it never pushes the query over
+    // Tavily's length limit.
+    const firstWebSearch = searchesRun.find((s) => !s.kenyan)
+    if (firstWebSearch && !searchesRun.some((s) => s.kenyan)) {
+        const kenyanQuery = `${firstWebSearch.query.slice(0, MAX_SEARCH_QUERY_LENGTH - " Kenya".length)} Kenya`
+        console.log(`Search (${KENYAN_SEARCH_TOOL}):`, kenyanQuery)
+        try {
+            snippets.push(...await search(kenyanQuery, true))
+        } catch (error) {
+            console.warn(`Search failed for query "${kenyanQuery}":`, error)
+        }
+    }
+
+    // Different searches often surface the same source page; collapse those
     // before handing the context to the author.
-    const contextStrings = dedupeSnippets(rawSnippets);
-
-    return { researchData: contextStrings }
-}
-
-/**
- * LangGraph node that turns gathered research into the final report.
- *
- * Reads the deduplicated snippets left by `researcherNode` in
- * `state.researchData`, joins them into a single context block, and asks
- * the OpenRouter-hosted Nemotron model to write a Markdown report grounded
- * in that context.
- *
- * @param state - Current graph state; reads `state.topic`,
- *   `state.reportStructure` and `state.researchData`.
- * @returns A partial state update setting `report` to the model's
- *   generated report text.
- */
-async function authorNode(state: typeof AgentState.State) {
-    console.log("--- RUNNING AUTHOR PHASE ---")
-
-    // Combine the gathered snippets into a solid text block
-    const context = state.researchData.join("\n\n")
-
-    const prompt = `You are an elite research assistant. 
-Using the real-time context below, write a professional report about: ${state.topic}.
-Use clear Markdown headers, bullet points, and an objective tone.
-.
- 
-Topic for this section:
-${state.topic}
- 
-When generating ${state.topic} search queries, ensure they:
-1. Suggest personalized meal plan for immunocomprised patients and they should be Kenyan meals
-2. Cover different aspects of the topic (e.g., elderly patients, RVD patients, diabetespatients, cancer patients, 
-immunosuppressed patients, infants and neonates, post operative patients, 
-all kinds of disease states. Consider age, gender, medical history and allergies. 
-Consider current medications and their drug-drug interactions and side effects
-utilise knowledge on the drug- nutrient interactions like CYP450 drug inducers and inhibitors.
-Safety is key.Account for renal/hepatic function, full med and supplement list, swallowing ability, labs/weight trend, food access and cost. 
-Top interaction categories to encode: grapefruit family,vitamin K consistency,tyramine,patassium,sodium,St John's Wort, calcium/iron timing)
-3. Include specific technical terms related to the topic
-4. Look for comparisons or differentiators from similar approaches
-5. Search for both official documentation and practical implementation examples
- 
-Your queries should be:
-- Specific enough to avoid generic results
-- Diverse enough to cover all aspects of the section plan
-- Focused on authoritative sources (documentation, technical blogs, academic papers)
-- Outline sources
-
-    REPORT STRUCTURE (follow this layout exactly, section by section):
-    ${state.reportStructure}
-
-    CONTEXT:
-    ${context}
-
-    REPORT:`;
-
-    const response = await model.invoke(prompt);
-
-    // Update the final state entry with the generated text
-    return { report: response.content as string };
-}
-
-const workflow = new StateGraph(AgentState)
-    // 1. Mount the components as executable blocks
-    .addNode("researcher", researcherNode)
-    .addNode("author", authorNode)
-
-    // 2. Map out the execution path links
-    .addEdge("__start__", "researcher")
-    .addEdge("researcher", "author")
-    .addEdge("author", END);
-
-// 3. Compile the structural map into a runnable agent application
-const reportApp = workflow.compile();
-
-// The layout a report follows when the caller doesn't supply its own
-const DEFAULT_REPORT_STRUCTURE = `This article should be a practical clinical reference, structured as:
-1. Introduction - why nutrition matters for immunocompromised patients (1-2 paragraphs)
-2. One section per patient group (elderly, RVD/HIV, diabetes, cancer, infants and neonates, post-operative), each with key nutritional needs and foods to favour or avoid
-3. Renal and hepatic dietary restrictions
-4. Drug-nutrient interactions - a Markdown table of drug/class, food or nutrient, effect, and advice
-5. Sample Kenyan meal plan - a Markdown table covering breakfast, lunch, supper and snacks
-6. Conclusion - key safety takeaways as bullet points
-7. Sources`
-
-/**
- * Runs the report graph (researcher -> author) for one topic and returns the
- * finished report. Only used when this file is run from the terminal.
- *
- * @param topic - What the report should be about.
- * @param reportStructure - The layout the report must follow.
- * @returns The generated report as a Markdown string.
- */
-async function generateReport(
-    topic: string,
-    reportStructure: string = DEFAULT_REPORT_STRUCTURE
-): Promise<string> {
-    const state = await reportApp.invoke({ topic, reportStructure })
-    return state.report
+    return dedupeSnippets(snippets)
 }
 
 // ---------------------------------------------------------------------------
@@ -275,142 +369,31 @@ const ChatState = Annotation.Root({
 // 10 turns = the last 5 questions and their 5 answers.
 const HISTORY_LIMIT = 10
 
-// Tavily rejects search queries longer than 400 characters.
-const MAX_SEARCH_QUERY_LENGTH = 400
-
-// The most searches the researcher will run for one question. Every search
-// is one Tavily request, so this is also the most a message can cost.
+// The most searches the researcher will run for one question, including the
+// Kenyan one. Every search is one Tavily request, so this is also the most a
+// message can cost.
 const MAX_QUERIES = 3
-
-// One of those searches is always the Kenyan one (see KENYAN_DOMAINS), so
-// the planner may write one fewer than the total.
-const MAX_PLANNED_QUERIES = MAX_QUERIES - 1
-
-// The Kenyan search only looks at these sites. A normal web search for a
-// food question mostly returns American and British pages, which describe
-// foods and portions a Kenyan patient may not recognise. These are the
-// Kenyan government and research bodies that publish nutrition guidance
-// (for example the Ministry of Health's National Guidelines for Healthy
-// Diets and the Kenya Food Composition Tables), plus the FAO, which
-// co-publishes several of them.
-const KENYAN_DOMAINS = [
-    "health.go.ke", //Ministry of Health
-    "familyhealth.go.ke", //Ministry of Health, Division of Family Health
-    "kilimo.go.ke", //Ministry of Agriculture
-    "kemri.go.ke", //Kenya Medical Research Institute
-    "fao.org", //Food and Agriculture Organization
-]
-
-// Put on the first line of every snippet that came from the Kenyan search,
-// so the author can tell Kenyan sources apart from the rest.
-const KENYAN_LABEL = "[Kenyan source]"
-
-// Tavily scores every result from 0 (unrelated) to 1 (a close match). The
-// Kenyan search is limited to a handful of sites, so when none of them
-// covers the question it still returns its "best" pages, which can be about
-// something else entirely (a farming factsheet for a warfarin question).
-// Results below this score are dropped, so that an unrelated page is never
-// passed to the author as Kenyan evidence.
-const MIN_KENYAN_SCORE = 0.4
-
-/**
- * Works out which searches to run for the visitor's question: one query per
- * angle we want covered, instead of one generic query.
- *
- * In the report graph the angles are a fixed list written by hand. Here they
- * have to be DYNAMIC, because every question is different: "can a patient on
- * warfarin eat sukuma wiki?" has a drug-interaction angle and a food angle,
- * while "what should an elderly diabetic eat after surgery?" has three
- * patient-group angles. So we ask the model to read the question and write
- * the queries itself.
- *
- * The model also sees the recent conversation, so it can turn a follow-up
- * like "what about spinach?" into a query that makes sense alone
- * ("spinach and warfarin vitamin K").
- *
- * It is also where off-topic questions are caught. If the question is not
- * about nutrition there is nothing worth searching for, so the model is told
- * to reply NONE and this function returns an empty list. That saves a search
- * we would otherwise pay for and then throw away.
- *
- * @param question - The message the visitor has just sent.
- * @param recentTurns - The last few turns of the conversation, for context.
- * @returns Up to MAX_PLANNED_QUERIES search queries, each a separate string. An
- *   empty list means the question is off-topic and needs no search.
- */
-async function planQueries(question: string, recentTurns: ChatTurn[]): Promise<string[]> {
-    const plannerPrompt = `You write web search queries for a clinical nutrition assistant. You never answer questions yourself.
-
-First, check the topic (do this before anything else):
-- The assistant only handles nutrition, food, diet, and how medicines interact with food.
-- If the user's latest question is about anything else (sport, news, politics, coding, general knowledge and so on), reply with only the single word NONE and stop. Do not write queries, code or an answer.
-
-Otherwise, read the conversation and the user's latest question, then write the search queries needed to answer it: one query per angle that should be covered, up to ${MAX_PLANNED_QUERIES}. Put the most important angle first.
-
-Angles to consider (use only the ones that apply to this question):
-- the patient group or condition (elderly, HIV, diabetes, cancer, infants and neonates, post-operative)
-- the medicine involved and its drug-nutrient interactions
-- renal or hepatic dietary restrictions
-- suitable foods or meals, preferably Kenyan
-
-Rules:
-- Each query must cover a DIFFERENT angle. Do not write the same query in different words.
-- Each query must make sense alone. Replace words like "they", "it" or "that" with what they refer to in the conversation.
-- A simple question may need only one query.
-- Never answer the question yourself. Your only job is to write search queries.
-- Write one query per line. No numbering, no bullet points, no quotation marks, no other text.`
-
-    try {
-        const response = await model.invoke([
-            { role: "system", content: plannerPrompt },
-            ...recentTurns,
-            { role: "user", content: question },
-        ])
-        const reply = (response.content as string).trim()
-
-        // NONE is the model telling us the question is off-topic. An empty
-        // list tells the researcher to skip the search. The pattern allows
-        // for small variations such as "none" or "NONE.".
-        if (/^none\.?$/i.test(reply)) {
-            return []
-        }
-
-        // Otherwise the model replies with one query per line. Split the reply into
-        // lines, strip any numbering or bullets it added anyway, drop empty
-        // lines, and keep at most MAX_PLANNED_QUERIES.
-        const queries = reply
-            .split("\n")
-            .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").replace(/^["']|["']$/g, "").trim())
-            .filter((line) => line.length > 0)
-            .slice(0, MAX_PLANNED_QUERIES)
-            .map((query) => query.slice(0, MAX_SEARCH_QUERY_LENGTH))
-
-        if (queries.length > 0) {
-            return queries
-        }
-    } catch (error) {
-        console.warn("Could not plan search queries:", error)
-    }
-
-    // If the model failed or returned nothing usable, fall back to searching
-    // for the question exactly as it was typed, so the visitor still gets
-    // an answer.
-    return [question.slice(0, MAX_SEARCH_QUERY_LENGTH)]
-}
 
 /**
  * LangGraph node that gathers research context for the visitor's question.
- * This is the chat version of `researcherNode` above and works the same way:
+ * This is the chat version of `researcherNode` in report.ts and works the
+ * same way:
+ * it hands the question to the ReAct researcher (`research`), which decides
+ * what to search for, reads the results, and searches again if something is
+ * still missing.
  *
- * Instead of a single broad Tavily search, it fans out several targeted
- * queries (one per angle of the question) concurrently via
- * `Promise.allSettled`, then merges and deduplicates the results into the
- * shared research context that `chatAuthorNode` reads.
+ * The difference is in the instructions. Every question is different, so
+ * the researcher works out the angles for this one (a drug-interaction angle
+ * and a food angle for "can a patient on warfarin eat sukuma wiki?"). It
+ * also sees the recent conversation, so it can turn a follow-up like "what
+ * about spinach?" into a query that makes sense alone ("spinach and
+ * warfarin vitamin K").
  *
- * There are two differences. The queries are written for each question by
- * `planQueries`, instead of being a fixed list. And one extra search is run
- * on Kenyan sites only, so the author has local guidance to draw on and can
- * tell the visitor when there was none.
+ * It is also where off-topic questions are caught. If the question is not
+ * about nutrition there is nothing worth searching for, so the researcher
+ * is told not to search at all. That saves searches we would otherwise pay
+ * for and then throw away. The same goes for messages that need no new
+ * facts, such as "thanks" or "make that shorter".
  *
  * @param state - Current graph state; reads `state.question` and
  *   `state.messages`.
@@ -421,71 +404,51 @@ Rules:
 async function chatResearcherNode(state: typeof ChatState.State) {
     console.log("--- RUNNING RESEARCHER PHASE ---")
 
-    // One query per angle we want covered, instead of one generic query.
-    // Keeping these as separate strings (rather than one combined query)
-    // is what lets each be searched independently and in parallel below.
-    const queries = await planQueries(state.question, state.messages.slice(-HISTORY_LIMIT))
-    console.log("Search queries:", queries)
+    const instructions = `You are the researcher for a clinical nutrition assistant. You find the evidence; someone else writes the answer. You never answer questions yourself.
 
-    // No queries means the question is off-topic, so there is nothing to
-    // search for. We still return an empty researchData (rather than
-    // nothing) because the state is saved between messages: without this,
-    // the author would be handed the research from the PREVIOUS question.
-    const mainQuery = queries[0]
-    if (mainQuery === undefined) {
-        return { researchData: [] }
-    }
+First, check the user's latest message (do this before anything else):
+- The assistant only handles nutrition, food, diet, and how medicines interact with food.
+- If the message is about anything else (sport, news, politics, coding, general knowledge and so on), do not call a tool. Reply with only the word NONE.
+- If the message needs no new facts (a greeting, thanks, or a request to shorten or reword the previous answer), also do not call a tool. Reply with only the word NONE.
 
-    // The Kenyan search: the most important angle again, but this time only
-    // on Kenyan sites. The planner puts the most important angle first, so
-    // that is mainQuery. Room is left for the word "Kenya" so that adding
-    // it never pushes the query over Tavily's length limit.
-    const kenyanQuery = `${mainQuery.slice(0, MAX_SEARCH_QUERY_LENGTH - " Kenya".length)} Kenya`
+Otherwise, find the evidence needed to answer it. You have two search tools: ${WEB_SEARCH_TOOL} (the whole web) and ${KENYAN_SEARCH_TOOL} (Kenyan government and research sites only). You can run up to ${MAX_QUERIES - 1} searches in total.
 
-    const searches = [
-        ...queries.map((query) => ({ query, kenyan: false })),
-        { query: kenyanQuery, kenyan: true },
+Angles to consider (use only the ones that apply to this question):
+- the patient group or condition (elderly, HIV, diabetes, cancer, infants and neonates, post-operative)
+- the medicine involved and its drug-nutrient interactions
+- renal or hepatic dietary restrictions
+- suitable foods or meals, preferably Kenyan (use ${KENYAN_SEARCH_TOOL} for these)
+
+How to work:
+- Search for the most important angle first. A simple question may need only one search.
+- Each query must cover a DIFFERENT angle. Do not search for the same thing in different words.
+- Each query must make sense alone. Replace words like "they", "it" or "that" with what they refer to in the conversation.
+- Read the results before deciding what to do next. If they miss the exact food, medicine or condition asked about, search again with a more specific query.
+- When you have enough to answer the question, stop: reply with the single word DONE and do not call a tool.`
+
+    // The recent conversation, then the new question last.
+    const conversation: BaseMessageLike[] = [
+        ...state.messages.slice(-HISTORY_LIMIT),
+        { role: "user", content: state.question },
     ]
 
-    // Fire all searches concurrently. `allSettled` (rather than
-    // `Promise.all`) is used deliberately: if one query's search fails, we
-    // still get results from the rest instead of the whole batch throwing.
-    const settledResults = await Promise.allSettled(
-        searches.map(({ query, kenyan }) => (tavilyClient.search(query, {
-            maxResults: 3,
-            ...(kenyan ? { includeDomains: KENYAN_DOMAINS } : {}),
-        })))
+    // An empty list means the researcher decided no search was needed. We
+    // still return it (rather than nothing) because the state is saved
+    // between messages: without this, the author would be handed the
+    // research from the PREVIOUS question.
+    const researchData = await research(
+        instructions,
+        conversation,
+        MAX_QUERIES,
+        state.question
     )
-    const kenyanIndex = searches.length - 1 //the Kenyan search is the last one
 
-    // Flatten each query's results into one list of snippets, logging (but
-    // not throwing on) any query that failed. Each snippet keeps its title
-    // and link in front of its text, so the author can tell the visitor
-    // where a fact came from. Snippets from the Kenyan search also get
-    // KENYAN_LABEL as their first line, and are kept only if they are
-    // relevant enough (see MIN_KENYAN_SCORE).
-    const rawSnippets: string[] = settledResults.flatMap((result, i) => {
-        if(result.status === 'fulfilled') {
-            const kenyan = i === kenyanIndex
-            const label = kenyan ? `${KENYAN_LABEL}\n` : ""
-            return result.value.results
-                ?.filter((res) => !kenyan || res.score >= MIN_KENYAN_SCORE)
-                .map((res) => `${label}${res.title}\nLink: ${res.url}\n${res.content.trim()}`) || []
-        }
-        console.warn(`Search failed for query"${searches[i]?.query}":`, result.reason)
-        return []
-    })
-
-    // Different angles of the same question often surface the same source
-    // page; collapse those before handing the context to the author.
-    const contextStrings = dedupeSnippets(rawSnippets);
-
-    return { researchData: contextStrings }
+    return { researchData }
 }
 
 /**
  * LangGraph node that turns gathered research into the answer. This is the
- * chat version of `authorNode` above.
+ * chat version of `authorNode` in report.ts.
  *
  * Reads the deduplicated snippets left by `chatResearcherNode` in
  * `state.researchData`, joins them into a single context block, and asks the
@@ -524,6 +487,7 @@ How to answer:
 - Base your answer on the search results below.
 - When you suggest foods or meals, prefer Kenyan foods that are affordable and easy to find.
 - If the answer depends on something you were not told (for example the patient's medicines, kidney or liver function, age or allergies), give the general answer and then ask for the one detail that matters most.
+- If the message needs no new facts (a greeting, thanks, or a request to shorten or reword your previous answer), reply to it using the conversation. The rules about gaps and sources below do not apply to it.
 
 Gaps in the evidence (the user is a patient and must be able to see these):
 - Before you write, compare the search results with the question. Check whether they cover the exact food and the exact medicine or condition the user asked about.
@@ -574,7 +538,7 @@ ${searchResults}`
 }
 
 // The chat graph follows the same architecture as the report graph: the
-// researcher gathers the context, then the author writes from it.
+// ReAct researcher gathers the context, then the author writes from it.
 //
 //   START -> researcher -> author -> END
 const chatWorkflow = new StateGraph(ChatState)
@@ -610,7 +574,8 @@ const lastActive = new Map<string, number>()
 // Every 10 minutes, delete the saved state of conversations nobody has
 // touched for an hour.
 // .unref() tells Node this timer alone should not keep the program running,
-// so `npm run report` can still exit when the report is finished.
+// so `npm run report` (which imports this file) can still exit when the
+// report is finished.
 setInterval(async () => {
     const cutoff = Date.now() - CONVERSATION_IDLE_LIMIT_MS
     for (const [threadId, lastUsed] of lastActive) {
@@ -646,37 +611,4 @@ export async function sendMessage(threadId: string, message: string): Promise<st
     lastActive.set(threadId, Date.now())
 
     return state.answer
-}
-
-// ---------------------------------------------------------------------------
-// Running this file from the terminal: writes the one-off report.
-// ---------------------------------------------------------------------------
-
-async function runAgent() {
-    const report = await generateReport("Nutrition for immuno compromised patients")
-
-    console.log("\n====== GENERATED REPORT ======\n");
-    console.log(report);
-
-    // A terminal can't render Markdown the way a notebook's Markdown() does,
-    // so also save the report to a file that can be opened in a previewer.
-    await writeFile("report.md", report);
-    console.log("\nReport saved to report.md");
-
-    // Convert the Markdown to HTML so it can be opened in a browser
-    const html = `<!doctype html>
-    <meta charset="utf-8">
-    <title>Report</title>
-    <body style="max-width: 850px; margin: 2rem auto; font-family: sans-serif">
-    ${await marked.parse(report)}
-    </body>`
-    await writeFile("report.html", html)
-    console.log("Report saved to report.html")
-}
-
-// Only run the one-off report when this file is started directly
-// (npx tsx agent.ts). When server.ts imports it, nothing runs until a
-// visitor asks a question.
-if (require.main === module) {
-    runAgent();
 }
