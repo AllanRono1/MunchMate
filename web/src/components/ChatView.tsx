@@ -61,7 +61,7 @@ export default function ChatView({ messages, pending, error, onSend, onClose }: 
             <header className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-100 bg-cream/90 px-4 py-3 backdrop-blur">
                 <button type="button" onClick={onClose} className="flex items-center gap-2" aria-label="Back to the home page">
                     <img className="h-7" src={MunchMateLogo} alt="" />
-                    <span className="font-spectral text-xl -tracking-wide">Munch Mate</span>
+                    <span className="font-spectral text-xl tracking-tight">Munch Mate</span>
                 </button>
                 <button
                     type="button"

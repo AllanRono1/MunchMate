@@ -83,7 +83,7 @@ export default function FaqPage({ onAsk }: { onAsk: () => void }) {
 
             <section className="mt-16 flex flex-col items-start gap-4 rounded-4xl bg-blue-50 p-6 md:mt-24 md:flex-row md:items-center md:justify-between md:p-10">
                 <div>
-                    <p className="font-spectral text-3xl/9 -tracking-wide md:text-4xl/11">Still have a question?</p>
+                    <p className="font-spectral text-3xl/9 tracking-tight md:text-4xl/11">Still have a question?</p>
                     <p className="pt-2 text-gray-500">Ask MunchMate directly. It is free and needs no account.</p>
                 </div>
                 <button type="button" onClick={onAsk} className="rounded-full bg-black px-5 py-3 text-sm font-medium text-white hover:bg-gray-500">

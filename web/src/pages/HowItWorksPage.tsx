@@ -1,3 +1,4 @@
+import type { ReactNode } from "react"
 import { Link } from "../router"
 
 // The steps from question to answer. Each one describes what the agent in
@@ -89,7 +90,7 @@ export default function HowItWorksPage({ onAsk }: { onAsk: () => void }) {
             </section>
 
             <section className="flex flex-col items-start gap-4 pt-16 md:flex-row md:items-center md:justify-between md:pt-24">
-                <p className="font-spectral text-3xl/9 -tracking-wide md:text-4xl/11">Ready to try it?</p>
+                <p className="font-spectral text-3xl/9 tracking-tight md:text-4xl/11">Ready to try it?</p>
                 <div className="flex flex-wrap gap-3">
                     <button type="button" onClick={onAsk} className="rounded-full bg-black px-5 py-3 text-sm font-medium text-white hover:bg-gray-500">
                         Ask a question
@@ -105,7 +106,7 @@ export default function HowItWorksPage({ onAsk }: { onAsk: () => void }) {
 
 /** The two-tone heading used at the top of each page, like "Why it works /
  *  for you" on the home page. */
-export function PageHeading({ title, accent, children }: { title: string; accent: string; children: React.ReactNode }) {
+export function PageHeading({ title, accent, children }: { title: string; accent: string; children: ReactNode }) {
     return (
         <header className="max-w-3xl">
             <h1 className="text-4xl/10 font-semibold tracking-tight md:text-5xl/14 lg:text-6xl/16">

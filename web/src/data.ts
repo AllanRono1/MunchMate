@@ -15,7 +15,7 @@ const data = [
     },
     {
         id: 3,
-        record: "45000",
+        record: "45,000",
         unit: "",
         title: "Kenya records about 45,000 new cancer cases each year",
         description: "Treatment drains strength and appetite, and good nutrition helps patients recover."

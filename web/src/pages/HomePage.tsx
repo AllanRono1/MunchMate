@@ -31,10 +31,11 @@ export default function HomePage({ draft, setDraft, onSubmit, heroFormRef, heroT
     })
     return(
         <main>
-            {/* The hero fills the screen under the 4rem (h-16) nav bar. svh
-                ignores the phone's address bar, so the box never hides behind it. */}
-            <section className="max-w-[95vw] mx-auto min-h-[calc(100svh-5rem)] text-center mt-3 bg-cream flex flex-col justify-end relative font-inter">
-                <div className="w-[95vw] h-[calc(100svh-5rem)] overflow-hidden rounded-2xl md:rounded-4xl">
+            {/* The hero fills the screen, less a small margin top and bottom;
+                the nav bar floats over its top. svh ignores the phone's
+                address bar, so the box never hides behind it. */}
+            <section className="max-w-[95vw] mx-auto min-h-[calc(100svh-1.5rem)] text-center mt-3 bg-cream flex flex-col justify-end relative font-inter">
+                <div className="w-[95vw] h-[calc(100svh-1.5rem)] overflow-hidden rounded-2xl md:rounded-4xl">
                     <video className="h-full w-full object-cover" loop autoPlay muted playsInline>
                         <source src={videoMP4Mobile} type="video/mp4" media="(max-width: 768px)"></source>
                         <source src={videoWEBMobile} type="video/webm" media="(max-width: 768px)"></source>

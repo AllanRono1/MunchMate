@@ -36,7 +36,7 @@ export default function QuestionForm({ draft, setDraft, onSubmit, compact = fals
             <button
                 type="submit"
                 disabled={!draft.trim()}
-                className={`disabled:opacity-60 arrow-btn p-2 text-white absolute bg-black border border-solid border-blue rounded-4xl ${compact ? "right-4 top-1/2 -translate-y-1/2" : "right-4 bottom-2"}`}
+                className={`disabled:opacity-60 p-2 text-white absolute bg-black border rounded-4xl ${compact ? "right-4 top-1/2 -translate-y-1/2" : "right-4 bottom-2"}`}
                 aria-label="Send"
             >
                 <svg

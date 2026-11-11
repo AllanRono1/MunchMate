@@ -132,7 +132,10 @@ export default function App() {
     return (
         <>
             <NavBar path={path} onAsk={focusQuestionBox} />
-            {page}
+            {/* The nav bar floats over the page. The home page's hero is meant
+                to sit under it; the other pages start 5rem lower (its height
+                plus its top-3 offset) so their headings are not covered. */}
+            {path === "/" ? page : <div className="pt-20">{page}</div>}
             <Footer />
 
             {/* A question box fixed to the bottom of the screen. It shares
@@ -155,7 +158,7 @@ export default function App() {
 function NotFoundPage() {
     return (
         <main className="mx-auto max-w-3xl px-4 py-24 text-center font-inter">
-            <h1 className="font-spectral text-5xl/14 -tracking-wider">Page not found</h1>
+            <h1 className="font-spectral text-5xl/14 tracking-tighter">Page not found</h1>
             <p className="pt-4 text-gray-500">That page does not exist.</p>
             <Link to="/" className="mt-8 inline-block rounded-full bg-black px-5 py-3 text-sm font-medium text-white hover:bg-gray-500">
                 Go to the home page
