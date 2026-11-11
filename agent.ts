@@ -145,8 +145,10 @@ const SEARCH_TOOLS = [
         type: "function" as const,
         function: {
             name: KENYAN_SEARCH_TOOL,
-            description: "Search Kenya's domain. Return the title, link and text of the top results",
-            parameter: {
+            description: "Search only Kenyan government and research sites (Ministry of Health, Ministry of Agriculture, KEMRI) and the FAO. Returns the title, link and text of the top results.",
+            // Must be "parameters" (plural): with any other name the model is
+            // never told this tool takes a query, so it calls it with none.
+            parameters: {
                 type: "object",
                 properties: {
                     query: {
