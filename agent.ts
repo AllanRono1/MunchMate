@@ -20,20 +20,11 @@ const tavilyClient = tavily({apiKey: process.env.TAVILY_API_KEY})
 // model name is what selects the free version; without it OpenRouter charges
 // for each request. Created once here so that both graphs share the same
 // model.
-// export const model = new ChatOpenAI({
-//     configuration: { baseURL: "https://openrouter.ai/api/v1" },
-//     modelName: "nvidia/nemotron-3-super-120b-a12b:free",
-//     apiKey: process.env.OPENROUTER_API_KEY
-//})
-
-//"https://openrouter.ai/api/v1"
-//"nvidia/nemotron-3-super-120b-a12b:free"
-
-
-
+// (nvidia/nemotron-3-super-120b-a12b:free was withdrawn from the free tier
+// in November 2026, so we use the newer Nemotron 3.5 Super instead.)
 export const model = new ChatOpenAI({
     configuration: {baseURL: "https://openrouter.ai/api/v1"},
-    modelName: "nvidia/nemotron-3-super-120b-a12b:free",
+    modelName: "nvidia/nemotron-3.5-super-vl:free",
     apiKey: process.env.OPENROUTER_API_KEY
 })
 
