@@ -11,7 +11,7 @@ const scrollData = [
         },
         heading: "Checks up to nine web pages for each question",
         details: "No more wandering from site to site. MunchMate brings food and medication guidance together in one place.",
-        link: ""
+        link: "/how-it-works"
     },
     {
         id: 2,
@@ -21,7 +21,7 @@ const scrollData = [
         },
         heading: "Recommends meals that fit your budget",
         details: "Get meal ideas built from affordable, local ingredients you can find at your nearest market.",
-        link: ""
+        link: "/how-it-works"
     },
     {
         id: 3,
@@ -31,7 +31,7 @@ const scrollData = [
         },
         heading: "Works right in your browser",
         details: "Nothing to download or install. Open MunchMate on any phone or computer and start asking.",
-        link: ""
+        link: "/how-it-works"
     }
 ]
 export default scrollData

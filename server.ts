@@ -78,6 +78,14 @@ server.post("/api/chat", validateChatRequest, messageLimiter, async (req, res) =
     }
 })
 
+// The site's pages (/how-it-works, /faq) only exist inside the React app,
+// not as files in web/dist. So any other GET request that is not for the API
+// gets index.html, and the app shows the right page for the address. Without
+// this, refreshing /faq or opening a link to it would give a 404.
+server.get(/^(?!\/api\/).*/, (_req, res) => {
+    res.sendFile("index.html", { root: "web/dist" })
+})
+
 // Render tells us which port to listen on through process.env.PORT.
 // On our own machine that is not set, so we fall back to 3000.
 const port = process.env.PORT || 3000

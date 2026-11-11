@@ -1,38 +1,65 @@
-import { useEffect, useState, type FormEvent } from "react"
-import { MAX_MESSAGE_LENGTH, useChat } from "./useChat"
-import ChatView, { submitOnEnter } from "./components/ChatView"
-import Stats from "./components/Stats"
-import data from "./data"
-import scrollData from "./scrollDetails"
-import ProsSlide from "./components/ProsSlide"
-import videoMP4Desktop from './assets/videos/wind_blowing_on_woman_desktop.mp4'
-import videoMP4Mobile from './assets/videos/wind_blowing_on_woman_mobile.mp4'
-import videoWEBMDesktop from './assets/videos/wind_blowing_on_womanWEBM_desktop.webm'
-import videoWEBMobile from './assets/videos/wind_blowing_on_womanWEBM_mobile.webm'
-import FAOLogo from "./assets/icons/FAO_logo.webp"
-import MohLogo from "./assets/icons/MoHKenyaLogo.webp"
-import WHOlogo from "./assets/icons/who-emblem.webp"
-import MunchMateLogo from "./assets/logo/munch-mate-mark-capsule-stack.svg"
+import { useEffect, useRef, useState, type FormEvent } from "react"
+import { useChat } from "./useChat"
+import ChatView from "./components/ChatView"
+import NavBar from "./components/NavBar"
+import Footer from "./components/Footer"
+import QuestionForm from "./components/QuestionForm"
+import HomePage from "./pages/HomePage"
+import HowItWorksPage from "./pages/HowItWorksPage"
+import FaqPage from "./pages/FaqPage"
+import { Link, usePath } from "./router"
 
-
-
-
-// Shown before the first message, to give the visitor somewhere to start.
-const EXAMPLE_QUESTIONS = [
-    "Can a patient on warfarin eat sukuma wiki every day?",
-    "Which foods should a patient on chemotherapy avoid?",
-    "Does grapefruit interact with tacrolimus?",
-]
+// The browser tab's title for each page.
+const TITLES: Record<string, string> = {
+    "/": "MunchMate: food and medication answers",
+    "/how-it-works": "How it works · MunchMate",
+    "/faq": "FAQ · MunchMate",
+}
 
 export default function App() {
+    // Which page the address bar points at, for example "/faq".
+    const path = usePath()
+
     // The conversation (messages, loading, errors), kept by useChat.
     const chat = useChat()
 
-    // Which screen to show. false = the landing page, true = the chat.
+    // Which screen to show. false = the site's pages, true = the chat.
     const [chatOpen, setChatOpen] = useState(false)
 
-    // What the visitor is typing in the landing page box.
+    // What the visitor is typing. Shared by every question box, so text
+    // carries over between them.
     const [draft, setDraft] = useState("")
+
+    // The hero box on the home page, and the box fixed to the bottom.
+    const heroFormRef = useRef<HTMLDivElement>(null)
+    const heroTextareaRef = useRef<HTMLTextAreaElement>(null)
+    const bottomTextareaRef = useRef<HTMLTextAreaElement>(null)
+
+    // On the home page, show the bottom box once the hero's box has scrolled
+    // up and out of view. An IntersectionObserver tells us whenever the hero
+    // box enters or leaves the screen, without checking on every scroll.
+    const [pastHero, setPastHero] = useState(false)
+    useEffect(() => {
+        const heroForm = heroFormRef.current
+        // The hero is only on the home page, and not while the chat is open.
+        if (!heroForm) return
+        const observer = new IntersectionObserver(([entry]) => {
+            if (!entry) return
+            // Off screen *above* the viewport means the visitor scrolled past
+            // it. (Off screen below would mean it has not been reached yet.)
+            setPastHero(!entry.isIntersecting && entry.boundingClientRect.top < 0)
+        })
+        observer.observe(heroForm)
+        return () => observer.disconnect()
+    }, [chatOpen, path])
+
+    // Other pages have no hero box, so the bottom box is always there.
+    const showBottomForm = path === "/" ? pastHero : true
+
+    // Name the browser tab after the page.
+    useEffect(() => {
+        document.title = TITLES[path] ?? "Page not found · MunchMate"
+    }, [path])
 
     // Make the browser's Back button leave the chat: opening the chat adds a
     // history entry, and pressing Back fires "popstate", which closes it.
@@ -45,7 +72,7 @@ export default function App() {
     // Open the chat screen and send the visitor's first question.
     function openChat(question: string) {
         chat.reset() // start a brand new conversation
-        setChatOpen(true) // swap the landing page for the chat screen
+        setChatOpen(true) // swap the page for the chat screen
         window.history.pushState({ chat: true }, "") // so Back returns here
         window.scrollTo(0, 0)
         chat.send(question)
@@ -56,14 +83,26 @@ export default function App() {
         window.history.back()
     }
 
-    // The landing page form was submitted (arrow button or Enter).
-    function handleLandingSubmit(event: FormEvent<HTMLFormElement>) {
+    // A question box was submitted (arrow button or Enter).
+    function handleSubmit(event: FormEvent<HTMLFormElement>) {
         // Without this the browser would reload the page.
         event.preventDefault()
         const question = draft.trim()
         if (!question) return
         setDraft("")
         openChat(question)
+    }
+
+    // The "Ask a question" buttons: put the cursor in a question box. On the
+    // home page that is the hero box (scrolling back up to it); elsewhere it
+    // is the box at the bottom.
+    function focusQuestionBox() {
+        if (path === "/" && heroTextareaRef.current) {
+            window.scrollTo({ top: 0, behavior: "smooth" })
+            heroTextareaRef.current.focus({ preventScroll: true })
+        } else {
+            bottomTextareaRef.current?.focus()
+        }
     }
 
     // While the chat is open, show only the chat screen.
@@ -79,98 +118,48 @@ export default function App() {
         )
     }
 
-    const patientData = data.map(patient => {
-        return <Stats key={patient.id} record={patient.record} unit={patient.unit} title={patient.title} description={patient.description}/>
-    })
-    const webPros = scrollData.map(item => {
-        return <ProsSlide key={item.id} src={item.img.src} alt={item.img.alt} heading={item.heading} details={item.details} link={item.link}/>
-    })
-    return(
-        <main>
-            <section className="max-w-[95vw] mx-auto min-h-[95vh] text-center mt-3 bg-cream flex flex-col justify-end relative font-inter">
-                <div className="w-[95vw] h-[95vh] overflow-hidden rounded-2xl">
-                    <video loop autoPlay muted playsInline>
-                        <source src={videoMP4Mobile} type="video/mp4" media="(max-width: 768px)"></source>
-                        <source src={videoWEBMobile} type="video/webm" media="(max-width: 768px)"></source>
-                        <source src={videoMP4Desktop} type="video/mp4" media="(min-width: 768px)"></source>
-                        <source src={videoWEBMDesktop} type="video/webm" media="(min-width: 768px)"></source>
-                        <p>
-                            Your browser doesn't support this video. Here is a
-                            <a href={videoMP4Desktop}>link to the video</a> instead.
-                        </p>
-                    </video>
+    let page
+    if (path === "/") {
+        page = <HomePage draft={draft} setDraft={setDraft} onSubmit={handleSubmit} heroFormRef={heroFormRef} heroTextareaRef={heroTextareaRef} />
+    } else if (path === "/how-it-works") {
+        page = <HowItWorksPage onAsk={focusQuestionBox} />
+    } else if (path === "/faq") {
+        page = <FaqPage onAsk={focusQuestionBox} />
+    } else {
+        page = <NotFoundPage />
+    }
+
+    return (
+        <>
+            <NavBar path={path} onAsk={focusQuestionBox} />
+            {page}
+            <Footer />
+
+            {/* A question box fixed to the bottom of the screen. It shares
+                `draft` with the hero box, so anything typed carries over. When
+                hidden, `inert` stops it taking keyboard focus or being read by
+                screen readers. */}
+            <div
+                inert={!showBottomForm}
+                className={`fixed inset-x-0 bottom-0 z-20 bg-linear-to-t from-white via-white/90 to-transparent px-3 pt-8 pb-3 font-inter transition duration-300 motion-reduce:transition-none md:pb-5 ${showBottomForm ? "translate-y-0 opacity-100" : "translate-y-full opacity-0"}`}
+            >
+                <div className="mx-auto max-w-[98.5%] md:max-w-2xl lg:max-w-3xl">
+                    <QuestionForm draft={draft} setDraft={setDraft} onSubmit={handleSubmit} textareaRef={bottomTextareaRef} compact />
                 </div>
-                <div className="absolute bottom-3 max-w-[98.5%] mx-auto">
-                    <h1 className=" text-white text-2xl/7 tracking-tight font-medium">A new level of confidence when eating with your medication</h1>
-                    <p className="text-cream text-sm/4 py-4">Whatever you're eating with your medication, start here.</p>
-                    <form className="relative" onSubmit={handleLandingSubmit}>
-                        <label>
-                            <span className="sr-only">Your question</span>
-                            <textarea
-                                className="pt-3 py-14 px-4 bg-white border-2 border-solid border-black rounded-3xl text-sm w-[98.5%]"
-                                placeholder={EXAMPLE_QUESTIONS[2]}
-                                value={draft}
-                                onChange={(event) => setDraft(event.target.value)}
-                                onKeyDown={submitOnEnter}
-                                maxLength={MAX_MESSAGE_LENGTH}
-                            ></textarea>
-                        </label>
-                        <button type="submit" disabled={!draft.trim()} className="disabled:opacity-60 arrow-btn p-2 text-white absolute right-4 bottom-2 bg-black border border-solid border-blue rounded-4xl" aria-label="Send">
-                        <svg 
-                        viewBox="0 0 24 24" 
-                        width="20" 
-                        height="20" 
-                        aria-hidden="true"
-                        fill="none" 
-                        stroke="currentColor" 
-                        strokeWidth="2"
-                        strokeLinecap="round" 
-                        strokeLinejoin="round">
-                        <path d="M5 12h14M13 6l6 6-6 6" />
-                        </svg>
-                        </button>
-                    </form>
-                </div>
-            </section>
-            <section className="max-w-[80vw] mx-auto text-3xl/8 tracking-tighter py-12">
-                <p className="font-spectral">
-                    MunchMate uses AI to search the web for each question, including Kenyan Ministry of Health and FAO guidance
-                    {" "}
-                    <span className="inline-flex align-middle relative">
-                        <img className="h-8 w-8 object-contain" srcSet={WHOlogo} alt="world health organisation logo"/>
-                        <img className="h-8 w-8 object-contain rounded-4xl relative right-2" srcSet={FAOLogo} alt="food and agriculture organisation logo"/>
-                        <img className="h-8 w-8 object-contain rounded-4xl border border-solid border-gray-200 relative right-4 bg-white" srcSet={MohLogo} alt="ministry of health logo"/>
-                    </span>, and gives you a short answer with links to every source it used.
-                    It’s free to use, never includes ads, and needs no account.
-                </p>
-            </section>
-            <section className="pb-12">
-                {patientData}
-            </section>
-            <section className="ml-3.5 mr-3.5 pb-10">
-                <h2 className="text-3xl/7 tracking-tight pb-5 font-semibold">Why it works<br></br><span className="text-blue-500">for you</span></h2>
-                <div className="font-inter pb-12 flex flex-nowrap overflow-x-auto gap-4 snap-x snap-mandatory overscroll-x-contain">
-                    {webPros}
-                </div>
-            </section>
-            <section className="max-w-[98vw] mx-auto text-center p-10">
-                <h2 className="font-spectral text-6xl/12 -tracking-widest pb-5">More coming soon</h2>
-                <p className="font-inter text-gray-400">Going beyond answers, you'll be able to save your medication list, build Kenyan meal plans around it, and keep every answer in one place.</p>
-            </section>
-            <footer className="mb-10">
-                <nav>
-                    <ul className="text-center font-spectral text-4xl/10 -tracking-widest p-12">
-                        <li><a href="">How it works</a></li>
-                        <li><a href="">Coming soon</a></li>
-                        <li><a href="">Frequently asked questions</a></li>
-                        <li><a href="">Feedback</a></li>
-                    </ul>
-                </nav>
-                <div className="text-center relative">
-                    <h2 className="font-spectral text-6xl/12 -tracking-widest pb-5">Munch Mate</h2>
-                    <img className="h-8 absolute left-1/2 -translate-x-1/2" src={MunchMateLogo} alt="Munch Mate Logo"/>
-                </div>
-            </footer>
+            </div>
+        </>
+    )
+}
+
+/** Shown for any address that is not one of the site's pages. */
+function NotFoundPage() {
+    return (
+        <main className="mx-auto max-w-3xl px-4 py-24 text-center font-inter">
+            <h1 className="font-spectral text-5xl/14 -tracking-wider">Page not found</h1>
+            <p className="pt-4 text-gray-500">That page does not exist.</p>
+            <Link to="/" className="mt-8 inline-block rounded-full bg-black px-5 py-3 text-sm font-medium text-white hover:bg-gray-500">
+                Go to the home page
+            </Link>
         </main>
     )
 }

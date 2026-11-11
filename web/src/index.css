@@ -35,3 +35,16 @@
     --font-inter: "Inter", sans-serif;
     --font-spectral: "Spectral", san-serif;
 }
+
+/* The testimonial slider fades each new quote in. Skipped for visitors who
+   ask their device for less motion. */
+@keyframes testimonial-fade {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+}
+.testimonial-fade {
+    animation: testimonial-fade 0.4s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+    .testimonial-fade { animation: none; }
+}
