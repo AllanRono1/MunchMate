@@ -219,6 +219,12 @@ async function search(query: string, kenyan: boolean): Promise<string[]> {
  *   Every search is one Tavily request, so this is also the most it costs.
  * @param fallbackQuery - What to search for if the model fails before it
  *   searches anything, so the author still has something to work from.
+ * @param maxRounds - The most times to ask the model what to search. Every
+ *   round is one model call, and each can take 20 to 30 seconds on the free
+ *   model, so the chat uses 1: the model plans all its searches at once, and
+ *   we skip the extra call where it reads the results and usually just says
+ *   it has enough. The report keeps several rounds, since it is not waited
+ *   on live.
  * @returns The deduplicated snippets from every search that was run. Empty
  *   if the model decided no search was needed.
  */
@@ -226,7 +232,8 @@ export async function research(
     instructions: string,
     conversation: BaseMessageLike[],//(union type - allows loose and flexible shorthand inputs) rep an array of objects that can be converted to chat messages
     maxSearches: number,
-    fallbackQuery: string
+    fallbackQuery: string,
+    maxRounds: number = MAX_RESEARCH_ROUNDS
 ): Promise<string[]> {
     // Everything the model has seen so far. It grows each round with the
     // model's tool calls and the results we send back.
@@ -237,7 +244,7 @@ export async function research(
     let searchesLeft = maxSearches - 1 //one is kept back for the Kenyan search
     let modelFailed = false
 
-    for (let round = 0; round < MAX_RESEARCH_ROUNDS && searchesLeft > 0; round++) {
+    for (let round = 0; round < maxRounds && searchesLeft > 0; round++) {
         // 1. Reason: ask the model what to search for next.
         let response
         try {
@@ -369,11 +376,11 @@ const MAX_QUERIES = 3
 
 /**
  * LangGraph node that gathers research context for the visitor's question.
- * This is the chat version of `researcherNode` in report.ts and works the
- * same way:
- * it hands the question to the ReAct researcher (`research`), which decides
- * what to search for, reads the results, and searches again if something is
- * still missing.
+ * This is the chat version of `researcherNode` in report.ts. It hands the
+ * question to the researcher (`research`), which decides what to search for.
+ * Unlike the report, the chat gives it a single round: it plans every search
+ * at once and does not read the results and search again, which saves one
+ * slow model call per question.
  *
  * The difference is in the instructions. Every question is different, so
  * the researcher works out the angles for this one (a drug-interaction angle
@@ -413,11 +420,11 @@ Angles to consider (use only the ones that apply to this question):
 - suitable foods or meals, preferably Kenyan (use ${KENYAN_SEARCH_TOOL} for these)
 
 How to work:
-- Search for the most important angle first. A simple question may need only one search.
+- You get ONE turn: call every search you need in this single reply, all at once. You will not see the results or get another turn, so do not hold any search back for later.
+- A simple question may need only one search. When the question names a food, especially a Kenyan food, also call ${KENYAN_SEARCH_TOOL} in the same reply.
 - Each query must cover a DIFFERENT angle. Do not search for the same thing in different words.
-- Each query must make sense alone. Replace words like "they", "it" or "that" with what they refer to in the conversation.
-- Read the results before deciding what to do next. If they miss the exact food, medicine or condition asked about, search again with a more specific query.
-- When you have enough to answer the question, stop: reply with the single word DONE and do not call a tool.`
+- Each query must be specific: name the exact food, medicine and condition asked about, so the results cover them and not just something related.
+- Each query must make sense alone. Replace words like "they", "it" or "that" with what they refer to in the conversation.`
 
     // The recent conversation, then the new question last.
     const conversation: BaseMessageLike[] = [
@@ -433,7 +440,11 @@ How to work:
         instructions,
         conversation,
         MAX_QUERIES,
-        state.question
+        state.question,
+        // One round: the model plans every search at once. A second round,
+        // to read the results, cost another 20 to 30 seconds per question
+        // and nearly always ended with the model saying it had enough.
+        1
     )
 
     return { researchData }
