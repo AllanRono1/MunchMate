@@ -9,8 +9,8 @@ export type Testimonial = {
 }
 
 // ILLUSTRATIVE EXAMPLES, not real reviews. They show how a nutritionist, a
-// caregiver and someone with diabetes might use MunchMate, and the page says
-// so under the slider. Replace them with real feedback (with each person's
+// caregiver and patients (diabetes, HIV, cancer) might use MunchMate, and the
+// page says so under the slider. Replace them with real feedback (with each person's
 // permission) as it comes in, then remove that note from Testimonials.tsx.
 const testimonials: Testimonial[] = [
     {
@@ -30,6 +30,18 @@ const testimonials: Testimonial[] = [
         quote: "I check how a meal fits with my metformin and my blood sugar before I go to the market. The answers talk about foods I actually buy, and asking costs me nothing.",
         name: "Living with diabetes",
         role: "Type 2 diabetes, Kisumu",
+    },
+    {
+        id: 4,
+        quote: "I take dolutegravir and wanted to know when to have my iron tablets and milk. MunchMate explained why the timing matters and linked the guidance, so I knew exactly what to ask my clinic.",
+        name: "HIV patient",
+        role: "On antiretroviral treatment, Mombasa",
+    },
+    {
+        id: 5,
+        quote: "During chemotherapy I could barely eat. I asked for soft, simple Kenyan foods and got ideas like uji and mashed sweet potato, with a reminder to be careful about food safety while my immunity is low.",
+        name: "Cancer patient",
+        role: "Having chemotherapy, Eldoret",
     },
 ]
 
